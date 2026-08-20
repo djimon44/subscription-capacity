@@ -1,0 +1,21 @@
+spring:
+  application:
+    name: subscription-capacity
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/subscription_capacity
+    username: ${DB_USERNAME:arcticblu}
+    password: ${DB_PASSWORD:arcticblu}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
