@@ -55,7 +55,7 @@ public final class DynamicProgrammingKnapsackSolver implements KnapsackSolver {
         // overflow. Because maxTableCells is an int and rows >= 2, this also
         // proves capacity < Integer.MAX_VALUE, making every cast below safe.
         if (capacity > (long) maxTableCells / rows - 1) {
-            throw new CapacityTooLargeException(
+            throw new ProblemTooLargeException(
                     "Problem too large to solve exactly: %d items with capacity %d exceeds the limit of %d table cells"
                             .formatted(candidates.size(), capacity, maxTableCells));
         }
@@ -112,7 +112,7 @@ public final class DynamicProgrammingKnapsackSolver implements KnapsackSolver {
             try {
                 total = Math.addExact(total, item.value());
             } catch (ArithmeticException overflow) {
-                throw new CapacityTooLargeException(
+                throw new ProblemTooLargeException(
                         "Combined item value exceeds the maximum representable total");
             }
         }

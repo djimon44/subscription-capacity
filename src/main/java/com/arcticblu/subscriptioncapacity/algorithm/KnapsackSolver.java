@@ -18,7 +18,7 @@ public interface KnapsackSolver {
      * @param knapsackItems    candidate items, never null
      * @param capacity maximum total weight, never negative
      * @return the optimal selection, never null; empty when nothing fits
-     * @throws CapacityTooLargeException if the problem exceeds solver limits
+     * @throws ProblemTooLargeException if the problem exceeds solver limits
      */
     KnapsackSolution solve(List<KnapsackItem> knapsackItems, long capacity);
 }
