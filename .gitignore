@@ -31,3 +31,7 @@ build/
 
 ### VS Code ###
 .vscode/
+
+# Local request fixtures for manual API testing
+request.json
+bad-*.json
