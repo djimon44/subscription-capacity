@@ -5,6 +5,15 @@ import java.util.List;
 public interface KnapsackSolver {
 
     /**
+     * Identifier for this solver, persisted with each run so the audit trail records
+     * which algorithm produced a result. Stored in a VARCHAR(32) column, so
+     * implementations must return at most 32 characters.
+     *
+     * @return the algorithm identifier, never null, at most 32 characters
+     */
+    String name();
+
+    /**
      * Selects the subset of items with the greatest total value whose combined
      * weight does not exceed {@code capacity}.
      *

@@ -37,6 +37,11 @@ public final class DynamicProgrammingKnapsackSolver implements KnapsackSolver {
     }
 
     @Override
+    public String name() {
+        return "DYNAMIC_PROGRAMMING";
+    }
+
+    @Override
     public KnapsackSolution solve(List<KnapsackItem> items, long capacity) {
         // Rejects a null list and null elements, guarantees O(1) get(), and
         // shields the computation from concurrent modification by the caller.
