@@ -14,7 +14,9 @@ import com.arcticblu.subscriptioncapacity.web.dto.SubscriptionRequestPayload;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -29,20 +31,32 @@ public class SubscriptionOptimizationService {
     private final KnapsackSolver solver;
     private final OptimizationRunRepository runRepository;
     private final Clock clock;
+    private final TransactionTemplate transactionTemplate;
 
     public SubscriptionOptimizationService(KnapsackSolver solver,
                                            OptimizationRunRepository runRepository,
-                                           Clock clock) {
+                                           Clock clock,
+                                           PlatformTransactionManager transactionManager) {
         this.solver = solver;
         this.runRepository = runRepository;
         this.clock = clock;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
     /**
      * Runs the allocation, persists both the candidates and the outcome, and
      * returns the accepted subscriptions.
+     *
+     * <p>Deliberately not annotated {@code @Transactional}. Scaling the amounts and
+     * running the knapsack search touch no database at all, yet a method-level
+     * annotation would check a pooled connection out on entry and hold it for the
+     * whole call. The search can take a noticeable time on a large problem, so a
+     * handful of concurrent optimisations would exhaust the pool while doing no
+     * database work. Only the write is wrapped, programmatically via
+     * {@link TransactionTemplate}: annotating a private helper instead would be
+     * silently ignored, since a self-invocation never passes through the proxy that
+     * applies the annotation.
      */
-    @Transactional
     public OptimizationResultResponse optimize(OptimizeRequest request) {
         List<SubscriptionRequestPayload> candidates = request.availableSubscriptions();
 
@@ -82,7 +96,9 @@ public class SubscriptionOptimizationService {
                     i));
         }
 
-        return toResultResponse(runRepository.save(run));
+        // The mapping stays inside the transaction: it walks the run's subscriptions
+        // association, which must not be touched once the persistence context closes.
+        return transactionTemplate.execute(status -> toResultResponse(runRepository.save(run)));
     }
 
     @Transactional(readOnly = true)

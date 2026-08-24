@@ -21,6 +21,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.SimpleTransactionStatus;
 
 import java.math.BigDecimal;
 import java.time.Clock;
@@ -57,12 +59,15 @@ class SubscriptionOptimizationServiceTest {
     @Mock
     private OptimizationRunRepository runRepository;
 
+    @Mock
+    private PlatformTransactionManager transactionManager;
+
     private SubscriptionOptimizationService service;
 
     @BeforeEach
     void createService() {
         service = new SubscriptionOptimizationService(
-                solver, runRepository, Clock.fixed(FIXED_NOW, ZoneOffset.UTC));
+                solver, runRepository, Clock.fixed(FIXED_NOW, ZoneOffset.UTC), transactionManager);
     }
 
     // --- optimize ------------------------------------------------------------------
@@ -309,6 +314,9 @@ class SubscriptionOptimizationServiceTest {
 
     private void stubSolver(KnapsackSolution solution) {
         when(solver.solve(anyList(), anyLong())).thenReturn(solution);
+        // The write runs inside a TransactionTemplate, which asks the manager for a
+        // status and hands it to the callback; a bare mock would supply null.
+        when(transactionManager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
         // A default mock returns null and the service maps the saved entity into its
         // response, so save() must hand back what it was given.
         when(runRepository.save(any(OptimizationRun.class))).thenAnswer(invocation -> invocation.getArgument(0));
