@@ -15,8 +15,6 @@ final class MinorUnits {
 
     static final int SCALE = CurrencyScale.SCALE;
 
-    private static final int MULTIPLIER_POWER = SCALE;
-
     private MinorUnits() {
     }
 
