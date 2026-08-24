@@ -1,25 +1,33 @@
 # Testing
 
+This document records the testing strategy and the reasoning behind each choice, 
+including the failures found along the way. It is written to be read alongside the test sources 
+rather than as a summary of them.
+
 This document explains what the test suite covers, how each test is written, and why it is
 written that way. It is meant to be read alongside the code — every excerpt below is quoted
-verbatim from a file under `src/test/java`.
+verbatim, from a file under `src/test/java` unless the surrounding text says otherwise.
 
 ---
 
 ## 1. Overview
 
-The suite has **80 tests** in seven files, falling into three tiers.
+The suite has **110 tests** in nine files, falling into three tiers.
 
 | Tier | Files | Tests | Docker | Time |
 |---|---|---|---|---|
-| Pure unit | `KnapsackItemTest`, `KnapsackSolutionTest`, `DynamicProgrammingKnapsackSolverTest`, `MinorUnitsTest` | 45 | no | ≈ 0.7 s |
-| Unit with mocks | `SubscriptionOptimizationServiceTest` | 16 | no | ≈ 2.4 s |
-| Full-stack integration | `SubscriptionCapacityApplicationTests`, `SubscriptionApiIntegrationTest` | 19 | **yes** | ≈ 26 s |
+| Pure unit | `KnapsackItemTest`, `KnapsackSolutionTest`, `DynamicProgrammingKnapsackSolverTest`, `BranchAndBoundKnapsackSolverTest`, `AdaptiveKnapsackSolverTest`, `MinorUnitsTest` | 74 | no | ≈ 0.4 s |
+| Unit with mocks | `SubscriptionOptimizationServiceTest` | 17 | no | ≈ 1.3 s |
+| Full-stack integration | `SubscriptionCapacityApplicationTests`, `SubscriptionApiIntegrationTest` | 19 | **yes** | ≈ 11 s |
 
-`./mvnw clean test` runs all three tiers and takes about 42 seconds end to end. Most of the
+`./mvnw clean test` runs all three tiers and takes about 18 seconds end to end. Most of the
 integration cost is one-time: starting the PostgreSQL container and building the Spring
 context. Both integration classes share a single container and a single cached context, so
-the second class costs ≈ 7 s rather than another ≈ 19 s.
+whichever runs second costs ≈ 3 s rather than another ≈ 8 s.
+
+Three of the six pure-unit files are solver tests. That weighting is deliberate: the
+knapsack search is the only part of the system with a non-obvious correctness argument, and
+it is the part with three implementations that must all agree (§4).
 
 Every file is named `*Test`, so Surefire picks all of them up. Failsafe is not configured in
 this project, which is why the full-stack tests are not named `*IT` — an `*IT` class would
@@ -89,9 +97,9 @@ wording.
 has specific behaviour for them (see `selectsWeightlessItemsAtZeroCapacity` in §2.3), so
 this test protects a boundary that a naive `< 1` guard would break.
 
-### 2.2 `algorithm/KnapsackSolutionTest` — 5 tests
+### 2.2 `algorithm/KnapsackSolutionTest` — 9 tests
 
-`KnapsackSolution` is the solver's return type. Two of its five tests are about the
+`KnapsackSolution` is the solver's return type. Two of its nine tests are about the
 defensive copy in its compact constructor, which is the kind of thing that is easy to
 delete during a refactor and hard to notice.
 
@@ -101,13 +109,17 @@ delete during a refactor and hard to notice.
 void copiesIndexListDefensively() {
     List<Integer> mutableIndices = new ArrayList<>(List.of(0, 1));
 
-    KnapsackSolution solution = new KnapsackSolution(mutableIndices, 15, 320);
+    KnapsackSolution solution = new KnapsackSolution(ALGORITHM, mutableIndices, 15, 320);
     mutableIndices.add(2);
     mutableIndices.clear();
 
     assertThat(solution.selectedIndices()).containsExactly(0, 1);
 }
 ```
+
+`ALGORITHM` is a file-level constant holding `"DYNAMIC_PROGRAMMING"`; the tests that are not
+about the name itself use it so the fixture reads as a solution rather than as a validation
+case.
 
 Note the fixture is `new ArrayList<>(List.of(0, 1))`, not `List.of(0, 1)`. An immutable list
 could not demonstrate the point — you need a list you can mutate afterwards. Mutating it
@@ -119,12 +131,42 @@ list they get back — by asserting `UnsupportedOperationException` from
 `solution.selectedIndices().add(2)`. Together the two tests establish that the record is
 genuinely immutable in both directions, which is what `List.copyOf` buys.
 
-The remaining three: `rejectsNegativeTotalWeight` and `rejectsNegativeTotalValue` mirror the
-`KnapsackItem` guards, and `emptySolutionSelectsNothing` pins that the `empty()` factory
-returns an empty selection with zero totals — the value the service relies on when nothing
-fits.
+`rejectsNegativeTotalWeight` and `rejectsNegativeTotalValue` mirror the `KnapsackItem`
+guards, and `emptySolutionSelectsNothing` pins that the `empty(String)` factory returns an
+empty selection with zero totals — the value the service relies on when nothing fits — while
+still carrying the name it was given.
 
-### 2.3 `algorithm/DynamicProgrammingKnapsackSolverTest` — 23 tests
+**The `algorithmName` component.** The record's first component identifies the algorithm
+that produced the result:
+
+```java
+public record KnapsackSolution(String algorithmName,
+                               List<Integer> selectedIndices,
+                               long totalWeight,
+                               long totalValue) {
+```
+
+It lives on the *solution* rather than on the solver because `AdaptiveKnapsackSolver`
+(§2.5) chooses an algorithm per request: one solver no longer means one algorithm, so a
+`name()` method on the solver interface could not answer the question honestly. Four tests
+cover the validation, which exists because the value is persisted straight into
+`optimization_run.algorithm_used`, a `VARCHAR(32) NOT NULL`:
+
+| Test | Fixture | Asserts |
+|---|---|---|
+| `rejectsNullAlgorithmName` | `null` | `IllegalArgumentException` naming `algorithmName` |
+| `rejectsBlankAlgorithmName` | `"   "` | ditto — whitespace is not an identifier |
+| `rejectsOverlongAlgorithmName` | `"A".repeat(33)` | `IllegalArgumentException` naming `32` |
+| `acceptsAlgorithmNameAtColumnWidth` | `"A".repeat(32)` | accepted, accessor returns it |
+
+The last two are the pair that matters. A length guard is exactly the kind of thing that
+gets written as `>= 32` by accident, and the boundary test is what distinguishes "rejects
+what the column cannot hold" from "rejects one character too early". Catching an overlong
+name here turns a `DataIntegrityViolationException` from PostgreSQL — thrown deep inside a
+flush, after the solver has already done its work — into an immediate, clearly worded
+failure at the point of construction.
+
+### 2.3 `algorithm/DynamicProgrammingKnapsackSolverTest` — 25 tests
 
 The largest and most important unit test file. It covers the exact 0/1 knapsack solver.
 
@@ -260,9 +302,146 @@ List<KnapsackItem> items = Arrays.asList(new KnapsackItem(0, 1, 10), null);
   `requireTotalValueFitsInLong` pre-check.
 - `rejectsNegativeCapacity` — `IllegalArgumentException` containing `-1`.
 
-The 23rd test is `matchesBruteForceAcrossRandomisedProblems`, covered in §4.
+**The algorithm name.** Two tests pin that the solver stamps its own name onto what it
+returns: `solutionNamesTheAlgorithm` asserts `"DYNAMIC_PROGRAMMING"` on a solved problem,
+and `emptySolutionNamesTheAlgorithm` asserts the same on the empty-list path. The second is
+not redundant — the empty path returns through `KnapsackSolution.empty(ALGORITHM_NAME)`
+rather than the reconstruction step, so it is a separate construction site that could be
+left unnamed.
 
-### 2.4 `service/MinorUnitsTest` — 12 tests
+The 25th test is `matchesBruteForceAcrossRandomisedProblems`, covered in §4.
+
+### 2.4 `algorithm/BranchAndBoundKnapsackSolverTest` — 13 tests
+
+`BranchAndBoundKnapsackSolver` solves the same problem as the dynamic programming solver by
+a completely different route: a depth-first search over include/exclude decisions, pruned by
+a fractional-relaxation upper bound. Its cost depends on the *number of items* rather than
+the *magnitude of the capacity*, which is why it exists — a capacity of 5,000,000,000 minor
+units has no DP table small enough to allocate, and no effect at all on this search.
+
+**Setup.** Two solvers are fields, because most of this file's value comes from comparing
+them:
+
+```java
+private final KnapsackSolver solver = new BranchAndBoundKnapsackSolver();
+private final KnapsackSolver referenceSolver = new DynamicProgrammingKnapsackSolver();
+```
+
+Note both are typed as the interface. Nothing in this file reaches for an implementation
+detail, so the tests would keep compiling if either class were replaced.
+
+The fixture is the same assignment example used in §2.3, deliberately: the two solvers are
+asked the identical question, so a discrepancy is visible at a glance.
+
+**Correctness and equivalence.**
+
+| Test | Fixture | Expectation |
+|---|---|---|
+| `solvesAssignmentExample` | the four investors, capacity 15 | indices `0, 1`, value 320, weight 15 |
+| `returnsOriginalItemIndices` | indices `10, 20, 30, 40` | reports `10, 20` |
+| `solvesVeryLargeCapacity` | weights near 10⁹, capacity 5 × 10⁹ | value 80,000 |
+| `alwaysSelectsWeightlessItemWithValue` | weights 0 and 7, capacity 5 | selects the weightless one |
+| `returnsEmptySolutionForNoItems` / `ForZeroCapacity` / `WhenNothingFits` | degenerate inputs | empty solution |
+| `rejectsNegativeCapacity` | capacity `-1` | `IllegalArgumentException` naming `-1` |
+| `rejectsTotalValueOverflow` | values `Long.MAX_VALUE` and `1` | `ProblemTooLargeException` |
+
+`returnsOriginalItemIndices` is sharper here than its DP counterpart. This solver *sorts*
+its items by descending value density before searching, so list position and reported index
+diverge by construction:
+
+```java
+// Densities are 26.67, 24.0, 20.0, 20.0, so the search reorders these entirely.
+```
+
+If the search ever reported its own sorted position, every downstream investor mapping would
+be silently wrong. The DP solver cannot make that mistake, because it never reorders.
+
+`solvesVeryLargeCapacity` is the test that justifies the class. Its comment records the
+arithmetic — a DP table for that capacity would need roughly 5 × 10⁹ columns — and the
+assertion shows the search returns the right answer regardless. This is the capability the
+adaptive solver (§2.5) exists to reach.
+
+**The algorithm name.** `solutionNamesTheAlgorithm` and `emptySolutionNamesTheAlgorithm`
+assert `"BRANCH_AND_BOUND"` on a solved problem and on the empty-list path respectively.
+These replaced an earlier test that asserted `solver.name()`; when the name moved onto the
+solution, the assertion had to move with it, and the empty path needed its own case for the
+reason given in §2.3.
+
+**The two cross-solver property tests** — `agreesWithDynamicProgramming` and
+`selectsSameSubsetAsDynamicProgramming`, 1,000 trials each — are covered in §4. They are the
+reason this file is worth its length.
+
+### 2.5 `algorithm/AdaptiveKnapsackSolverTest` — 10 tests
+
+`AdaptiveKnapsackSolver` owns no search of its own. It holds one instance of each of the
+other two solvers and answers one question per request: *does the dynamic programming table
+for this problem fit the configured ceiling?* If it does, DP runs; if it does not, branch and
+bound runs. The consequence for callers is that a large capacity is no longer an error.
+
+The routing test is a copy of the guard inside the DP solver, written as a division so no
+product can overflow:
+
+```java
+int rows = items.size() + 1;
+return capacity <= (long) maxTableCells / rows - 1;
+```
+
+That duplication is the risk this file exists to manage. If the two conditions ever drift
+apart, the adaptive solver will route a problem to DP that DP then refuses, and a
+`ProblemTooLargeException` will reach a caller who was promised it could not.
+
+**Routing.** Four tests pin the decision, three of them against a deliberately tiny ceiling
+so the boundary is reachable by hand:
+
+| Test | Solver | Problem | Expected `algorithmName` |
+|---|---|---|---|
+| `solvesSmallProblemWithDynamicProgramming` | default | assignment example, capacity 15 | `DYNAMIC_PROGRAMMING` |
+| `staysOnDynamicProgrammingAtTheCeiling` | `new AdaptiveKnapsackSolver(10)` | one item, capacity 4 | `DYNAMIC_PROGRAMMING` |
+| `fallsThroughToBranchAndBoundPastTheCeiling` | `new AdaptiveKnapsackSolver(10)` | one item, capacity 5 | `BRANCH_AND_BOUND` |
+| `ceilingTightensAsItemsAreAdded` | `new AdaptiveKnapsackSolver(30)` | capacity 14 with 1 item, then 5 | `DYNAMIC_PROGRAMMING`, then `BRANCH_AND_BOUND` |
+
+The middle two are a matched pair on either side of the same boundary — 2 rows × 5 columns
+is exactly the 10-cell ceiling, and one more unit of capacity is one column too many. Either
+test alone would pass against an off-by-one; together they pin the boundary exactly, and
+`staysOnDynamicProgrammingAtTheCeiling` deliberately mirrors
+`solvesProblemExactlyOnTableCeiling` in §2.3 so the two sides of the duplicated condition are
+tested at the same point.
+
+`ceilingTightensAsItemsAreAdded` covers the part of the formula the other three hold
+constant. The ceiling is not a capacity limit but a *cell* limit, so adding items lowers it:
+at 30 cells one item allows a capacity of 14, five items allow only 4. The same capacity
+therefore routes differently depending on how many candidates applied — a property that a
+test fixing the item count could not see.
+
+Every routing test asserts the selected indices and totals as well as the name. The name
+alone would prove which branch ran, not that the branch returned the right answer.
+
+**No longer an error.**
+
+```java
+assertThatNoException().isThrownBy(() -> solver.solve(items, capacity));
+```
+
+`solvesCapacityBeyondAnyFeasibleTable` states the user-visible promise directly: a capacity
+of 5 × 10⁹ minor units, far past any allocatable table, is *solved* rather than refused.
+Before the adaptive solver, this exact input produced `ProblemTooLargeException` and a `413`
+from the API. `solvesCapacityAtTheTopOfTheLongRange` pushes it to `Long.MAX_VALUE`, which is
+the input most likely to overflow a carelessly written fit check; it asserts a correct answer
+rather than merely the absence of a crash.
+
+`returnsEmptySolutionForNoItems` asserts the empty triple and that the name `isNotBlank()`,
+rather than naming a specific algorithm. That is deliberate: which solver handles an empty
+list is an implementation detail of the routing, and pinning it would make the test fail on a
+legitimate change. What must hold is that *some* algorithm is recorded, because the column is
+`NOT NULL`.
+
+`rejectsNegativeCapacity` and `rejectsNonPositiveTableCeiling` confirm the delegating solver
+does not swallow the guards its delegates provide.
+
+**The randomised cross-check** — `matchesDynamicProgrammingAcrossRandomisedProblems`, 500
+trials — is covered in §4, and is the most important test in the file.
+
+### 2.6 `service/MinorUnitsTest` — 12 tests
 
 `MinorUnits` converts between `BigDecimal` currency amounts and the `long` minor units the
 solver operates on. This is where money bugs live, so it gets its own file.
@@ -349,7 +528,7 @@ the same for `0.00`.
 `100` — each asserting `toDecimal(toMinorUnits(x))` compares equal to `x`. The `100` case is
 there to close the negative-scale loop from earlier.
 
-### 2.5 `service/SubscriptionOptimizationServiceTest` — 16 tests
+### 2.7 `service/SubscriptionOptimizationServiceTest` — 17 tests
 
 A plain Mockito test with no Spring context. This is the tier that checks *orchestration*:
 what the service passes to the solver, what it builds to persist, and what it returns.
@@ -358,11 +537,11 @@ what the service passes to the solver, what it builds to persist, and what it re
 
 ```java
 private static final Instant FIXED_NOW = Instant.parse("2026-06-01T10:00:00Z");
-private static final String SOLVER_NAME = "TEST_SOLVER";
+private static final String SOLUTION_ALGORITHM_NAME = "TEST_ALGORITHM";
 
 /** The assignment example: A and B together fill a capacity of 15 for a fee of 320. */
 private static final KnapsackSolution ASSIGNMENT_SOLUTION =
-        new KnapsackSolution(List.of(0, 1), 1500L, 32000L);
+        new KnapsackSolution(SOLUTION_ALGORITHM_NAME, List.of(0, 1), 1500L, 32000L);
 
 @Mock
 private KnapsackSolver solver;
@@ -370,18 +549,22 @@ private KnapsackSolver solver;
 @Mock
 private OptimizationRunRepository runRepository;
 
+@Mock
+private PlatformTransactionManager transactionManager;
+
 private SubscriptionOptimizationService service;
 
 @BeforeEach
 void createService() {
     service = new SubscriptionOptimizationService(
-            solver, runRepository, Clock.fixed(FIXED_NOW, ZoneOffset.UTC));
+            solver, runRepository, Clock.fixed(FIXED_NOW, ZoneOffset.UTC), transactionManager);
 }
 ```
 
 The service is constructed by hand. Nothing here needs a Spring context: the class has one
-constructor and three collaborators, so `new` is faster, more explicit, and cannot break
-because of an unrelated bean.
+constructor and four collaborators, so `new` is faster, more explicit, and cannot break
+because of an unrelated bean. The fourth of those collaborators is a transaction manager —
+see §5.8 for why the service takes one at all.
 
 Note that `ASSIGNMENT_SOLUTION` is a *canned* answer. This file does not test whether
 `(0, 1)` is the right selection — `DynamicProgrammingKnapsackSolverTest` did that. Here the
@@ -393,9 +576,9 @@ of it can be examined.
 ```java
 private void stubSolver(KnapsackSolution solution) {
     when(solver.solve(anyList(), anyLong())).thenReturn(solution);
-    // Left unstubbed, name() returns null and the OptimizationRun constructor rejects
-    // it, so every run-producing case needs this regardless of what it asserts on.
-    when(solver.name()).thenReturn(SOLVER_NAME);
+    // The write runs inside a TransactionTemplate, which asks the manager for a
+    // status and hands it to the callback; a bare mock would supply null.
+    when(transactionManager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
     // A default mock returns null and the service maps the saved entity into its
     // response, so save() must hand back what it was given.
     when(runRepository.save(any(OptimizationRun.class))).thenAnswer(invocation -> invocation.getArgument(0));
@@ -403,10 +586,11 @@ private void stubSolver(KnapsackSolution solution) {
 ```
 
 Both comments record a trap. An unstubbed mock method returns the type's default — `null`
-for objects — and both of those nulls cause a confusing failure a long way from their cause:
-`solver.name()` returning `null` trips `Objects.requireNonNull(algorithmUsed, …)` inside the
-`OptimizationRun` constructor, and `save()` returning `null` produces a
-`NullPointerException` when the service maps the result. See §3 for the general technique.
+for objects — and either null causes a confusing failure a long way from its cause. `save()`
+returning `null` produces a `NullPointerException` when the service maps the result, and
+`getTransaction` returning `null` hands a null `TransactionStatus` to the callback, which is
+tolerable today but would break the moment the callback consults it. See §3 for the general
+technique and §5.8 for the transaction manager.
 
 The helper is called explicitly by each test rather than run from `@BeforeEach`, because
 `MockitoExtension` defaults to strict stubs and would fail the one test that never reaches
@@ -444,7 +628,7 @@ That is worth knowing: `SubscriptionRequest.equals` returns `false` when `id` is
 these fixtures must not be compared by equality or put in a `HashSet`. None of the
 assertions do.
 
-**The `optimize` cases (13).**
+**The `optimize` cases (14).**
 
 1. `scalesAmountsToMinorUnits` — captures the item list and asserts weights
    `500, 1000, 300, 800` and values `12_000, 20_000, 8_000, 16_000`, and that the captured
@@ -462,20 +646,26 @@ assertions do.
    order, so a stable-but-wrong permutation cannot pass.
 7. `recordsBothCountsFromTheirOwnSource` — `acceptedCount` 2, `candidateCount` 4. A
    regression test; see §6.
-8. `recordsTheSolverOwnName` — asserts `getAlgorithmUsed()` equals `"TEST_SOLVER"`. The
-   value is distinctive on purpose: it cannot coincidentally match a hardcoded constant in
-   production code. See §6.
-9. `convertsTotalsBackFromMinorUnits` — `15.00` and `320.00` by `isEqualByComparingTo`, from
+8. `recordsTheAlgorithmNameFromTheSolution` — stubs a solution carrying
+   `"NOT_A_REAL_ALGORITHM"` and asserts `getAlgorithmUsed()` reports exactly that. The value
+   is not a plausible algorithm name on purpose: it cannot coincidentally match a hardcoded
+   constant in production code, and its obvious fakeness announces to the next reader that
+   the point of the test is *provenance*, not the name itself. See §5.7 and §6.
+9. `recordsTheAlgorithmNameOfEachRunSeparately` — the same assertion with
+   `"BRANCH_AND_BOUND"`, a name a real solver could return. Together with case 8 it pins that
+   the recorded name tracks the solution rather than being fixed once: the service reads it
+   per run, which is what an adaptive solver requires.
+10. `convertsTotalsBackFromMinorUnits` — `15.00` and `320.00` by `isEqualByComparingTo`, from
    the solver's `1500` and `32000`.
-10. `timestampsFromTheInjectedClock` — `getCreatedAt()` equals `FIXED_NOW` exactly. Only
+11. `timestampsFromTheInjectedClock` — `getCreatedAt()` equals `FIXED_NOW` exactly. Only
     possible because the clock is injected; see §3.
-11. `responseReportsAcceptedSubscriptionsOnly` — the returned DTO names exactly Investor A
+12. `responseReportsAcceptedSubscriptionsOnly` — the returned DTO names exactly Investor A
     and Investor B. Distinct from case 4: the *run* holds four, the *response* shows two.
-12. `persistsRunWhenNothingIsSelected` — stubs `KnapsackSolution.empty()` and asserts the
+13. `persistsRunWhenNothingIsSelected` — stubs `KnapsackSolution.empty(…)` and asserts the
     response is empty with zero totals **and** that the run is still saved with four
     subscriptions, all rejected, `acceptedCount` 0. "Nothing fits" is a successful run, not
     an error.
-13. `refusesExcessPrecisionBeforeSolving` — passes `5.123` and asserts
+14. `refusesExcessPrecisionBeforeSolving` — passes `5.123` and asserts
     `InvalidSubscriptionInputException`, then:
 
 ```java
@@ -511,7 +701,7 @@ that the summary's counts come from the run's stored fields, and — via the spy
 building the summary never touches the subscriptions association. See §5.4 for why that last
 line is the point of the test.
 
-### 2.6 Integration support: `TestcontainersConfiguration` and friends
+### 2.8 Integration support: `TestcontainersConfiguration` and friends
 
 Three small files in the root test package.
 
@@ -564,7 +754,7 @@ PostgreSQL:
 SpringApplication.from(SubscriptionCapacityApplication::main).with(TestcontainersConfiguration.class).run(args);
 ```
 
-### 2.7 `web/SubscriptionApiIntegrationTest` — 18 tests
+### 2.9 `web/SubscriptionApiIntegrationTest` — 18 tests
 
 The full stack: real HTTP over a real port, a real Spring context, and a real PostgreSQL
 container. Nothing is mocked.
@@ -770,7 +960,7 @@ when(runRepository.save(any(OptimizationRun.class))).thenAnswer(invocation -> in
 entity, and the service uses that return value:
 
 ```java
-return toResultResponse(runRepository.save(run));
+return transactionTemplate.execute(status -> toResultResponse(runRepository.save(run)));
 ```
 
 An unstubbed mock returns `null`, so `toResultResponse(null)` throws a
@@ -792,9 +982,10 @@ statements about interactions and cannot be expressed any other way.
 **Strict stubs.** `MockitoExtension` defaults to `STRICT_STUBS`: a stub that is declared but
 never used fails the test with `UnnecessaryStubbingException`. This is a feature — it stops
 stale stubs accumulating — but it dictates the structure of this file. `stubSolver(...)` is
-called by the twelve tests that need it rather than from `@BeforeEach`, because
+called by the thirteen tests that need it rather than from `@BeforeEach`, because
 `refusesExcessPrecisionBeforeSolving` never reaches the solver and would fail on unused
-stubs.
+stubs — and the same applies to the transaction-manager stub it now carries, since that test
+never opens a transaction either.
 
 ### `ArgumentCaptor`
 
@@ -918,7 +1109,28 @@ type argument — hence the `PROBLEM` and `LISTING` constants.
 
 ---
 
-## 4. The randomised cross-check
+## 4. The randomised cross-checks
+
+There are now **three** randomised property tests, one per solver, and between them they do
+more to establish correctness than all the hand-written cases combined.
+
+| Test | File | Trials | Oracle | Property |
+|---|---|---|---|---|
+| `matchesBruteForceAcrossRandomisedProblems` | `DynamicProgrammingKnapsackSolverTest` | 500 | exhaustive enumeration | the DP optimum *is* the true optimum |
+| `agreesWithDynamicProgramming` / `selectsSameSubsetAsDynamicProgramming` | `BranchAndBoundKnapsackSolverTest` | 1,000 each | the DP solver | branch and bound finds the same optimum *and* breaks ties identically |
+| `matchesDynamicProgrammingAcrossRandomisedProblems` | `AdaptiveKnapsackSolverTest` | 500 | the DP solver | routing never changes the answer, on either branch |
+
+The three are layered, and the order matters. The first establishes that dynamic programming
+is correct against a definitional oracle. Once that holds, DP itself becomes a usable oracle
+for the second, which is what makes the branch-and-bound comparison meaningful rather than
+circular — comparing two unverified implementations proves only that they are wrong in the
+same way. The third then checks the layer above both: not whether either algorithm is
+correct, which is already settled, but whether *choosing between them* preserves the answer.
+
+§4.1 covers the first in detail; §4.2 and §4.3 cover the other two, and §4.4 records
+what they caught.
+
+### 4.1 Dynamic programming against brute force
 
 This single test does more to establish the solver's correctness than all the hand-written
 cases combined.
@@ -950,7 +1162,7 @@ void matchesBruteForceAcrossRandomisedProblems() {
 }
 ```
 
-### How the trials are generated
+#### How the trials are generated
 
 `RANDOM_TRIALS = 500` problems are drawn from a `Random` seeded with
 `RANDOM_SEED = 20_250_821L`.
@@ -964,13 +1176,14 @@ void matchesBruteForceAcrossRandomisedProblems() {
 
 Every range includes its degenerate case. Capacity can be 0, weight can be 0, value can be
 0 — so weightless items, worthless items, and zero-capacity problems all occur naturally
-across 500 trials rather than only in the hand-written cases.
+across 500 trials rather than only in the hand-written cases. That is not a footnote: the
+one real defect these cross-checks have found so far lived in exactly such an item (§4.4).
 
 The ranges are chosen so brute force stays affordable. Twelve items is 4096 subsets, and the
 DP table is at most 13 × 40 = 520 cells, so the whole 500-trial loop runs in a fraction of a
-second — the entire class, all 23 tests, completes in about half a second.
+second — the entire class, all 25 tests, completes in under a tenth of a second.
 
-### How brute force works
+#### How brute force works
 
 ```java
 /**
@@ -1012,7 +1225,7 @@ programming table is not — there is no recurrence to get wrong, no reconstruct
 tie-breaking. It is exponential and useless in production, which is exactly why it is
 trustworthy as an oracle.
 
-### Why agreement between two implementations is strong evidence
+#### Why agreement between two implementations is strong evidence
 
 A hand-written test case encodes one expected answer, which the author computed themselves —
 so it demonstrates the implementation agrees with its author on one input. If the author
@@ -1027,7 +1240,7 @@ input — implausible for implementations with nothing structurally in common.
 This is property-based testing done by hand: the property is "the DP solver's optimum equals
 the true optimum", checked against a definitional oracle rather than a fixed expectation.
 
-### Why only the total value is asserted
+#### Why only the total value is asserted
 
 The Javadoc states it plainly: *"the optimal selection is not uniquely determined, so only
 the optimum itself is safe to compare against."*
@@ -1047,7 +1260,7 @@ right value while exceeding the capacity would be wrong, and value alone would n
 The tie-breaking rules that *do* constrain the selection are pinned separately by the three
 deterministic tie-break tests in §2.3, where the expected subset is well-defined.
 
-### Why the seed is fixed
+#### Why the seed is fixed
 
 `new Random(20_250_821L)` produces the same 500 problems on every run, on every machine,
 forever. This matters for three reasons.
@@ -1079,6 +1292,189 @@ The `.as(...)` descriptions exist for the same reason:
 
 When trial 384 of 500 fails, the message names the trial number, the capacity, and the full
 item list, so the failing case can be lifted straight into a new permanent regression test.
+§4.4 records what happened when one did.
+
+### 4.2 Branch and bound against dynamic programming
+
+Once §4.1 has established that dynamic programming returns the true optimum, DP itself
+becomes an oracle — and a far cheaper one than enumeration, which is what makes 1,000 trials
+affordable in a test class that finishes in 67 ms.
+
+```java
+private final KnapsackSolver solver = new BranchAndBoundKnapsackSolver();
+private final KnapsackSolver referenceSolver = new DynamicProgrammingKnapsackSolver();
+```
+
+| Quantity | Expression | Range |
+|---|---|---|
+| item count | `1 + random.nextInt(14)` | 1 to 14 inclusive |
+| capacity | `random.nextInt(60)` | 0 to 59 inclusive |
+| weight | `random.nextInt(25)` | 0 to 24 inclusive |
+| value | `random.nextInt(100)` | 0 to 99 inclusive |
+
+The seed is `20260824L`, and the reasoning of §4.1 on fixed seeds applies unchanged.
+
+**Two tests, not one.** Both regenerate the identical 1,000 problems from the same seed, and
+they assert different things about them:
+
+- `agreesWithDynamicProgramming` asserts `totalValue` and `totalWeight` match the reference,
+  that the weight is within capacity, and — via two small helpers — that the reported totals
+  are the actual sums of the selected items:
+
+```java
+assertThat(sumWeights(items, actual)).isEqualTo(actual.totalWeight());
+assertThat(sumValues(items, actual)).isEqualTo(actual.totalValue());
+```
+
+  Those last two close a gap that §4.1 leaves open: a solver could report the right optimum
+  alongside an index list that has nothing to do with it, and value-only assertions would
+  never notice.
+
+- `selectsSameSubsetAsDynamicProgramming` asserts the far stronger claim that
+  `selectedIndices` is *equal*, element for element.
+
+That second assertion would be illegitimate for most optimisation problems — §4.1 explains
+at length why brute force can only be asked about the optimum, not the selection. It is
+legitimate here for one reason: the `KnapsackSolver` interface does not merely promise *an*
+optimal subset, it specifies a total order over the optimal ones — greatest value, then
+least weight, then preferring to exclude items appearing later in the input. That promise
+makes the selection uniquely determined, and therefore a legal thing to compare. If the
+interface ever relaxed the promise, this test would have to go with it.
+
+### 4.3 The adaptive solver against dynamic programming
+
+The adaptive solver contains no search, so this test is not asking whether an algorithm is
+correct. It asks whether the *choice* between two known-correct algorithms is transparent —
+whether a caller could tell, from the answer alone, which one ran. The answer must be no.
+
+```java
+KnapsackSolver adaptiveSolver = new AdaptiveKnapsackSolver(300);
+KnapsackSolver referenceSolver = new DynamicProgrammingKnapsackSolver();
+```
+
+The ceiling of 300 cells is the load-bearing part of the fixture. With 1 to 14 items the row
+count runs from 2 to 15, so the ceiling `300 / rows - 1` runs from 149 down to 19, while
+capacities are drawn from 0 to 59. Some trials therefore fall inside the table and some
+outside, and the routing genuinely varies across the 500 problems. The reference solver is
+unbounded, so it runs dynamic programming on every trial regardless.
+
+Each trial asserts all three components — selected indices, total value, total weight —
+because the promise under test is that the two branches are indistinguishable, and the
+indices are where an unfaithful tie-break would surface first.
+
+**Why the extra assertion is not optional.**
+
+```java
+if (actual.algorithmName().equals("DYNAMIC_PROGRAMMING")) {
+    dynamicProgrammingTrials++;
+} else {
+    branchAndBoundTrials++;
+}
+...
+// Without this the cross-check could silently degrade into comparing one branch
+// against itself while the other went entirely unexercised.
+assertThat(dynamicProgrammingTrials).isPositive();
+assertThat(branchAndBoundTrials).isPositive();
+```
+
+Consider the failure this guards against. Suppose the fit check breaks so that *every*
+problem routes to dynamic programming — a comparison inverted, a ceiling read from the wrong
+field, a `+ 1` that became a `- 1`. The adaptive solver would then be compared against the
+DP solver on 500 trials in which the adaptive solver *is* the DP solver. Every assertion
+would pass, on every trial, for as long as the bug lived. The test would be a tautology and
+would look exactly like a healthy one: green, fast, five hundred trials.
+
+That is the specific hazard of testing a component whose only job is delegation. The
+comparison assertions verify the *answers*; only the counters verify that the test exercised
+anything. Two lines convert a test that cannot fail into one that fails the moment routing
+collapses to a single branch — and they are worth more than the 500 comparisons they
+accompany, because the comparisons only mean anything if these hold.
+
+The counters deliberately assert `isPositive()` rather than a specific split. Pinning "217
+dynamic programming trials and 283 branch-and-bound trials" would encode an artefact of the
+seed and would fail on any harmless change to the ranges. What matters is that neither
+branch is dead.
+
+### 4.4 What the cross-check actually caught
+
+**The failure.** When `selectsSameSubsetAsDynamicProgramming` was first run against branch
+and bound, it failed on exactly one trial in a thousand. The two solvers agreed on the
+optimum and agreed on the total weight, and disagreed about a single index: the problem
+contained an item of **weight 0 and value 0**, which either solver could include or exclude
+with byte-identical totals.
+
+Both answers were optimal. Only the interface's tie-break rule distinguished them — and that
+rule is not decorative, because `SubscriptionOptimizationService` maps those indices onto
+investors and writes an accepted-or-declined flag for each. A worthless, weightless candidate
+recorded as accepted by one solver and declined by the other is a visible difference in the
+audit trail, produced by requests the caller would consider identical.
+
+**The fix, and the fix that was not made.** The tempting response is to weaken the assertion:
+compare only the totals, or filter zero-value items out of the generated problems. Either
+would have made the suite green in under a minute, and either would have destroyed the only
+evidence that the two solvers disagreed about anything.
+
+What was done instead was to implement the full tie-break rule in branch and bound. That
+meant a comparison over complete selections:
+
+```java
+/**
+ * Whether {@code candidate} is preferred over {@code incumbent} under the
+ * interface's final tie-break rule, which favours excluding items appearing
+ * later in the input.
+ * ...
+ * This reproduces the preference that falls out of the dynamic programming
+ * solver's cell-by-cell iteration, so both solvers name the same subset when
+ * several are equally optimal.
+ */
+private static boolean excludesLaterItems(List<Integer> candidate, List<Integer> incumbent)
+```
+
+and, inseparably from it, a pruning comparison that sits one character away from the
+textbook version:
+
+```java
+// Deliberately strict. Textbook branch and bound prunes on <=, since a
+// subtree that can only match the incumbent value adds nothing. Here a tie
+// on value is broken further by weight and then by item index, so a tying
+// subtree may still hold the preferred solution and must be explored.
+if (upperBound(depth, value, weight) < bestValue) {
+    return;
+}
+```
+
+`<` rather than `<=`. Textbook branch and bound prunes any subtree that cannot *beat* the
+incumbent, on the reasoning that a subtree which merely ties adds nothing — true when only
+the optimum matters, false the moment ties are broken by a further rule. Prune on `<=` and
+the subtree holding the preferred tied selection is discarded before it is ever examined:
+no crash, no wrong optimum, no exception, just a different equally optimal subset. That is
+about as close to invisible as a defect gets.
+
+**Why this is the strongest argument in this document for property-based testing.** Every
+hand-written test in §2.4 passed throughout, and had to: each encodes a case its author
+thought of, and nobody sits down to write "what if a candidate applies for nothing, pays no
+fee, and the tie is otherwise perfect". The defect lived in an input nobody would have
+chosen. It was found because a thousand inputs were generated that nobody chose.
+
+Three properties of the test turned the discovery into a short fix rather than a long,
+intermittent mystery:
+
+1. **The seed is fixed.** The failing trial reproduced on every run, on every machine, in the
+   same position. An unseeded generator would have produced a failure that appeared once in
+   CI, vanished on re-run, and got filed as flaky — with the disagreement still shipping.
+2. **The AssertJ description carries the fixture.** The message named the trial number, the
+   capacity, and the full item list, so the offending problem could be lifted off the console
+   and pasted straight into a scratch test. Without `.as(...)` the message would have read
+   `expected: [0, 2] but was: [0, 1, 2]` — accurate, useless, and an afternoon of adding
+   print statements inside a thousand-iteration loop.
+3. **The oracle was already trusted.** Because §4.1 had established the DP solver against
+   exhaustive enumeration, there was never an argument about *which* solver was wrong.
+
+The general form: a hand-written test asserts that the code does what its author expected on
+inputs its author imagined. A property test asserts that an invariant holds across inputs
+nobody imagined — and when it fails, a fixed seed and a description carrying the fixture are
+what convert "something, somewhere, is wrong" into a specific, reproducible, one-character
+defect.
 
 ---
 
@@ -1250,22 +1646,140 @@ The explicit `createdAt` assertion on the following line is redundant — record
 already covers it. It is kept because it names the second of the two regressions, which a
 whole-record comparison does not.
 
-### 5.6 Known gaps
+### 5.6 The two randomised solver tests are split, not merged
+
+**Decision.** `BranchAndBoundKnapsackSolverTest` runs the same 1,000 generated problems
+twice, in two separate tests: one asserting the totals and their self-consistency, the other
+asserting the selected indices.
+
+**Reasoning.** Merging them would halve the work and lose the diagnosis. The two assertions
+fail for entirely different reasons, and the split is what makes the failure message answer
+the first question a reader will ask.
+
+If `agreesWithDynamicProgramming` goes red, branch and bound found a **worse optimum** —
+the search is wrong. The bound is unsound, or the capacity check is off, or a subtree that
+held the answer was pruned on value. That is a correctness bug and the solver is unusable.
+
+If `selectsSameSubsetAsDynamicProgramming` goes red *while the first stays green*, both
+solvers found the optimum and they disagree only about **which equally optimal subset to
+name**. That is a tie-break bug: real, worth fixing (§4.4 is exactly this failure), and of a
+completely different severity — no caller gets a suboptimal allocation, they get a different
+but equally good one.
+
+One merged test would report "branch and bound disagrees with dynamic programming" for both,
+and the reader would have to work out which kind of disagreement it was before they could
+judge how alarming it is. Two tests answer that from the test name alone. The duplicated
+generation loop costs about 30 ms, which is a good price for a diagnosis.
+
+### 5.7 The algorithm-name regression test stubs an obviously fake value
+
+**Decision.** The test pinning where the recorded algorithm name comes from stubs a name no
+real solver could ever return:
+
+```java
+stubSolver(new KnapsackSolution("NOT_A_REAL_ALGORITHM", List.of(0, 1), 1500L, 32000L));
+
+service.optimize(assignmentExample());
+
+assertThat(capturedRun().getAlgorithmUsed()).isEqualTo("NOT_A_REAL_ALGORITHM");
+```
+
+**Reasoning.** The bug this test exists to catch is the service hardcoding a name instead of
+reading one — writing `"DYNAMIC_PROGRAMMING"` into the run because that is what the solver
+used to be. A stub named `"DYNAMIC_PROGRAMMING"` could not catch that: the assertion would
+pass against the bug, because the hardcoded constant and the stubbed value would coincide.
+The stub must be a value production code has no way to produce.
+
+Fakeness is doing a second job, though, and it is the reason the value is
+`"NOT_A_REAL_ALGORITHM"` rather than something merely arbitrary like `"XYZZY"`. A reader
+meeting this test cold has to reconstruct why it is here. A name that could not possibly be
+real announces the intent in the fixture itself: nobody writes that string unless the point
+is *where the value came from* rather than what it is. The test is self-documenting in a way
+that a plausible-looking stub would not be, and `@DisplayName` says the rest — "the recorded
+algorithm name comes from the returned solution, not a constant".
+
+`recordsTheAlgorithmNameOfEachRunSeparately` sits next to it with a plausible name,
+`"BRANCH_AND_BOUND"`, and covers the complementary case: not just that the value is read,
+but that it is read *per run*, which is what an adaptive solver requires and what a field
+cached in the constructor would break.
+
+This is the same reasoning as the older `"TEST_SOLVER"` stub the test replaced, applied to
+a value that now travels on the solution rather than on the solver — see §6, where exactly
+this bug was introduced deliberately and this test was the thing that caught it.
+
+### 5.8 The service test stubs a `PlatformTransactionManager`
+
+**Decision.** `SubscriptionOptimizationServiceTest` has a fourth mock, and `stubSolver`
+gives it a real status object to hand back:
+
+```java
+@Mock
+private PlatformTransactionManager transactionManager;
+...
+when(transactionManager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
+```
+
+**Reasoning.** This is not test scaffolding for its own sake; it is the visible consequence
+of a production decision. `optimize` is deliberately **not** annotated `@Transactional`.
+Scaling the amounts and running the knapsack search touch no database at all, and a
+method-level annotation would check a pooled connection out on entry and hold it for the
+whole call — including a search that can run for a noticeable time on a large problem. A
+handful of concurrent optimisations would exhaust the pool while doing no database work.
+
+So the transaction covers only the write, opened programmatically:
+
+```java
+return transactionTemplate.execute(status -> toResultResponse(runRepository.save(run)));
+```
+
+`TransactionTemplate` rather than an annotation on a private method, because a private
+method called from `optimize` goes through `this` rather than through the Spring proxy — the
+annotation would be silently ignored and no transaction would start at all. That is a trap
+worth naming, because the broken version looks correct and passes every unit test.
+
+The cost is that the service now takes a `PlatformTransactionManager`, so the unit test must
+supply one. A bare mock would return `null` from `getTransaction`, which the current callback
+tolerates only because it never consults the status; stubbing a `SimpleTransactionStatus`
+costs one line and removes a null that would become a `NullPointerException` the moment the
+callback grew. The stub lives in `stubSolver` rather than `@BeforeEach` for the same reason
+the other stubs do: `MockitoExtension` runs in strict-stubs mode and would fail the tests
+that never reach the write.
+
+The boundary itself — that the mapping stays *inside* the transaction, so the run's
+subscriptions association is read before the persistence context closes — is not provable
+with mocks. It is proved by the POST-then-GET integration test in §5.5, which would fail with
+a `LazyInitializationException` if the transaction closed too early.
+
+### 5.9 Known gaps
 
 Recorded honestly rather than argued away.
 
-- **The randomised test does not check selection consistency.** It asserts the total value
-  and that the weight is within capacity, but never that `selectedIndices` actually sum to
-  the reported `totalWeight` and `totalValue`. A solver returning the correct optimum
-  alongside an unrelated index list would pass this test. The deterministic tests do assert
-  selections, so the gap is covered in aggregate, but not by this test.
+- **The brute-force cross-check does not check selection consistency.** It asserts the
+  total value and that the weight is within capacity, but never that `selectedIndices`
+  actually sum to the reported `totalWeight` and `totalValue`. A solver returning the correct
+  optimum alongside an unrelated index list would pass that test. The gap is narrower than it
+  was — the branch-and-bound cross-check asserts exactly that consistency (§4.2), and the
+  adaptive one compares indices directly (§4.3) — but it remains open for the dynamic
+  programming solver's own randomised test, where the deterministic cases carry it instead.
+- **Nothing tests the adaptive solver under a ceiling large enough to matter.** The routing
+  tests use ceilings of 10, 30, and 300 cells so the boundary is reachable by hand. The
+  configured production ceiling is 50,000,000, and no test allocates a table anywhere near
+  it; a defect that only appears at realistic memory pressure would not be caught here.
+- **The duplicated fit check is tested on both sides but not pinned together.** §2.5 tests
+  the adaptive solver's condition and §2.3 tests the dynamic programming solver's, at the
+  same boundary values. Nothing fails if a future change updates one and not the other —
+  the two conditions are compared only by a reader.
+- **The branch-and-bound solver has no test for pathological search time.** Its worst case is
+  exponential, and every generated problem is at most 14 items. A capacity and item set
+  chosen adversarially could take far longer than any test would tolerate, and nothing bounds
+  or measures that.
 - **`postgres:latest` is a floating tag.** The database version can change under the suite
   without any change to the repository.
 - **`refusesIdentifierThatIsNotAUuid` never inspects the body.** It asserts status and
   content type and discards the result, so it would still pass if the problem document's
   `title` or `detail` regressed. The other rejection tests check the body.
 - **`rendersAmountsAtTwoDecimalPlaces` asserts on a deserialised value, not raw JSON.** The
-  reasoning in §2.7 holds, but it is one inference removed from the wire format; a raw-body
+  reasoning in §2.9 holds, but it is one inference removed from the wire format; a raw-body
   assertion would be more direct.
 - **`capsOversizedPageRequests` mostly tests framework configuration.** The cap comes from
   `spring.data.web.pageable.max-page-size: 100`, not from application code. It is still worth
@@ -1286,7 +1800,7 @@ run against each. The project's own sources were not modified.
 | Bug | Result | Caught by |
 |---|---|---|
 | `acceptedCount` and `candidateCount` swapped in `SubscriptionOptimizationService` | 12 errors in the service test, 7 failures in the integration test | see below |
-| `solver.name()` replaced with the literal `"DYNAMIC_PROGRAMMING"` | 1 failure + 11 errors in the service test | `recordsTheSolverOwnName` |
+| the recorded algorithm name replaced with the literal `"DYNAMIC_PROGRAMMING"` | 1 failure + 11 errors in the service test | `recordsTheSolverOwnName`, now `recordsTheAlgorithmNameFromTheSolution` |
 | `movePointRight(SCALE)` changed to `movePointRight(SCALE + 1)` in `MinorUnits` | 12 failures across three files | see below |
 
 **Swapped counts.** All 12 affected service tests reported *errors*, not failures — and none
@@ -1315,6 +1829,23 @@ angle — the production code stopped asking the collaborator a question it used
 integration test caught this one, and none could: the real solver genuinely is named
 `DYNAMIC_PROGRAMMING`, and `OptimizationRunSummary` does not expose the algorithm name over
 the API at all.
+
+*This experiment predates the refactor that moved the name onto the solution*, so the exact
+mechanism it describes no longer exists: there is no `solver.name()` to stub out, and the
+strict-stubs half of the signal went with it. The mutation it stands for does survive —
+hardcoding a literal where `solution.algorithmName()` should be read — and its detector is
+`recordsTheAlgorithmNameFromTheSolution`, which stubs `"NOT_A_REAL_ALGORITHM"` for precisely
+the reason the old test stubbed `"TEST_SOLVER"` (§5.7). The mutation is also strictly more
+dangerous now than it was then: with an adaptive solver choosing per request, a hardcoded
+`"DYNAMIC_PROGRAMMING"` would be *correct on most runs* and quietly wrong on the large-capacity
+ones that actually ran branch and bound, producing an audit trail that misreports how a
+result was reached. The conclusion about integration coverage is unchanged and still worth
+stating: nothing at the HTTP tier would notice, because the algorithm name is never exposed
+over the API.
+
+The experiment has not been repeated against the current suite. Rerunning it — and adding a
+fourth mutation that inverts the adaptive solver's fit check, which §4.3 argues would be
+caught only by the routing counters — is the obvious next step for this section.
 
 **Wrong scale factor.** 7 of 12 `MinorUnitsTest` tests failed — every scaling case except
 `scalesZero`, which is immune because zero scales to zero at any factor, plus the two
