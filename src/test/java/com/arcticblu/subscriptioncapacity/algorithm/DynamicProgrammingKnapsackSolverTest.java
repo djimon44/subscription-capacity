@@ -268,6 +268,19 @@ class DynamicProgrammingKnapsackSolverTest {
     }
 
     @Test
+    @DisplayName("the returned solution names the algorithm that produced it")
+    void solutionNamesTheAlgorithm() {
+        assertThat(solver.solve(ASSIGNMENT_EXAMPLE, ASSIGNMENT_CAPACITY).algorithmName())
+                .isEqualTo("DYNAMIC_PROGRAMMING");
+    }
+
+    @Test
+    @DisplayName("an empty solution names the algorithm too")
+    void emptySolutionNamesTheAlgorithm() {
+        assertThat(solver.solve(List.of(), 100).algorithmName()).isEqualTo("DYNAMIC_PROGRAMMING");
+    }
+
+    @Test
     @DisplayName("a non-positive table ceiling is rejected at construction")
     void rejectsNonPositiveTableCeiling() {
         assertThatExceptionOfType(IllegalArgumentException.class)

@@ -1,6 +1,6 @@
 package com.arcticblu.subscriptioncapacity.config;
 
-import com.arcticblu.subscriptioncapacity.algorithm.DynamicProgrammingKnapsackSolver;
+import com.arcticblu.subscriptioncapacity.algorithm.AdaptiveKnapsackSolver;
 import com.arcticblu.subscriptioncapacity.algorithm.KnapsackSolver;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -15,7 +15,7 @@ public class AlgorithmConfiguration {
 
     @Bean
     public KnapsackSolver knapsackSolver(OptimizationProperties properties) {
-        return new DynamicProgrammingKnapsackSolver(properties.maxTableCells());
+        return new AdaptiveKnapsackSolver(properties.maxTableCells());
     }
 
     @Bean

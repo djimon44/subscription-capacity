@@ -29,9 +29,9 @@ spring:
 
 arcticblu:
   optimization:
-    # A request is rejected when capacity > maxTableCells / (itemCount + 1) - 1, with
-    # capacity expressed in minor units. Three tables are allocated (two long, one
+    # Dynamic programming is used while capacity <= maxTableCells / (itemCount + 1) - 1,
+    # with capacity expressed in minor units. Three tables are allocated (two long, one
     # boolean) at 17 bytes per cell, so this ceiling corresponds to roughly 850 MB.
-    # Requests exceeding it fail with ProblemTooLargeException, pending the
-    # branch-and-bound solver, which is not bounded by capacity.
+    # Requests exceeding it fall through to branch and bound, which is not bounded by
+    # capacity, rather than being rejected.
     max-table-cells: 50000000

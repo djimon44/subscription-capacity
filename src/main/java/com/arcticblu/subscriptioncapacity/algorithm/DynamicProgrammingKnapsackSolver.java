@@ -23,6 +23,9 @@ public final class DynamicProgrammingKnapsackSolver implements KnapsackSolver {
 
     public static final int DEFAULT_MAX_TABLE_CELLS = 10_000_000;
 
+    /** Recorded on every solution this solver produces. */
+    public static final String ALGORITHM_NAME = "DYNAMIC_PROGRAMMING";
+
     private final int maxTableCells;
 
     public DynamicProgrammingKnapsackSolver() {
@@ -37,11 +40,6 @@ public final class DynamicProgrammingKnapsackSolver implements KnapsackSolver {
     }
 
     @Override
-    public String name() {
-        return "DYNAMIC_PROGRAMMING";
-    }
-
-    @Override
     public KnapsackSolution solve(List<KnapsackItem> items, long capacity) {
         // Rejects a null list and null elements, guarantees O(1) get(), and
         // shields the computation from concurrent modification by the caller.
@@ -51,7 +49,7 @@ public final class DynamicProgrammingKnapsackSolver implements KnapsackSolver {
             throw new IllegalArgumentException("capacity must not be negative: " + capacity);
         }
         if (candidates.isEmpty()) {
-            return KnapsackSolution.empty();
+            return KnapsackSolution.empty(ALGORITHM_NAME);
         }
 
         int rows = candidates.size() + 1;
@@ -141,6 +139,7 @@ public final class DynamicProgrammingKnapsackSolver implements KnapsackSolver {
         }
 
         return new KnapsackSolution(
+                ALGORITHM_NAME,
                 selected.reversed(),
                 bestWeight[candidates.size()][capacity],
                 bestValue[candidates.size()][capacity]);

@@ -20,10 +20,8 @@ import java.util.Set;
  */
 public final class BranchAndBoundKnapsackSolver implements KnapsackSolver {
 
-    @Override
-    public String name() {
-        return "BRANCH_AND_BOUND";
-    }
+    /** Recorded on every solution this solver produces. */
+    public static final String ALGORITHM_NAME = "BRANCH_AND_BOUND";
 
     @Override
     public KnapsackSolution solve(List<KnapsackItem> items, long capacity) {
@@ -33,7 +31,7 @@ public final class BranchAndBoundKnapsackSolver implements KnapsackSolver {
             throw new IllegalArgumentException("capacity must not be negative: " + capacity);
         }
         if (candidates.isEmpty()) {
-            return KnapsackSolution.empty();
+            return KnapsackSolution.empty(ALGORITHM_NAME);
         }
         requireTotalValueFitsInLong(candidates);
 
@@ -221,7 +219,7 @@ public final class BranchAndBoundKnapsackSolver implements KnapsackSolver {
         private KnapsackSolution toSolution() {
             List<Integer> sorted = new ArrayList<>(bestSelection);
             sorted.sort(Comparator.naturalOrder());
-            return new KnapsackSolution(sorted, bestWeight, bestValue);
+            return new KnapsackSolution(ALGORITHM_NAME, sorted, bestWeight, bestValue);
         }
     }
 }

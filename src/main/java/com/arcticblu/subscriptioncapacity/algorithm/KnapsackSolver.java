@@ -2,16 +2,14 @@ package com.arcticblu.subscriptioncapacity.algorithm;
 
 import java.util.List;
 
+/**
+ * Solves 0/1 knapsack problems.
+ *
+ * <p>Implementations record their own name in the returned
+ * {@link KnapsackSolution}, so a solver that chooses between algorithms per
+ * request can report whichever one actually ran.
+ */
 public interface KnapsackSolver {
-
-    /**
-     * Identifier for this solver, persisted with each run so the audit trail records
-     * which algorithm produced a result. Stored in a VARCHAR(32) column, so
-     * implementations must return at most 32 characters.
-     *
-     * @return the algorithm identifier, never null, at most 32 characters
-     */
-    String name();
 
     /**
      * Selects the subset of items with the greatest total value whose combined

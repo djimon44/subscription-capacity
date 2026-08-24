@@ -45,11 +45,11 @@ import static org.mockito.Mockito.when;
 class SubscriptionOptimizationServiceTest {
 
     private static final Instant FIXED_NOW = Instant.parse("2026-06-01T10:00:00Z");
-    private static final String SOLVER_NAME = "TEST_SOLVER";
+    private static final String SOLUTION_ALGORITHM_NAME = "TEST_ALGORITHM";
 
     /** The assignment example: A and B together fill a capacity of 15 for a fee of 320. */
     private static final KnapsackSolution ASSIGNMENT_SOLUTION =
-            new KnapsackSolution(List.of(0, 1), 1500L, 32000L);
+            new KnapsackSolution(SOLUTION_ALGORITHM_NAME, List.of(0, 1), 1500L, 32000L);
 
     @Mock
     private KnapsackSolver solver;
@@ -157,13 +157,26 @@ class SubscriptionOptimizationServiceTest {
     }
 
     @Test
-    @DisplayName("the recorded algorithm name is whatever the solver calls itself")
-    void recordsTheSolverOwnName() {
-        stubSolver(ASSIGNMENT_SOLUTION);
+    @DisplayName("the recorded algorithm name comes from the returned solution, not a constant")
+    void recordsTheAlgorithmNameFromTheSolution() {
+        // A solver may pick a different algorithm per request, so the only trustworthy
+        // source is the solution it hands back. Stubbing an unmistakable name proves the
+        // service reads it rather than hardcoding one of the real algorithm names.
+        stubSolver(new KnapsackSolution("NOT_A_REAL_ALGORITHM", List.of(0, 1), 1500L, 32000L));
 
         service.optimize(assignmentExample());
 
-        assertThat(capturedRun().getAlgorithmUsed()).isEqualTo(SOLVER_NAME);
+        assertThat(capturedRun().getAlgorithmUsed()).isEqualTo("NOT_A_REAL_ALGORITHM");
+    }
+
+    @Test
+    @DisplayName("a second run records the name its own solution carried")
+    void recordsTheAlgorithmNameOfEachRunSeparately() {
+        stubSolver(new KnapsackSolution("BRANCH_AND_BOUND", List.of(0, 1), 1500L, 32000L));
+
+        service.optimize(assignmentExample());
+
+        assertThat(capturedRun().getAlgorithmUsed()).isEqualTo("BRANCH_AND_BOUND");
     }
 
     @Test
@@ -202,7 +215,7 @@ class SubscriptionOptimizationServiceTest {
     @Test
     @DisplayName("a run in which nothing fits is still persisted with all its rejected candidates")
     void persistsRunWhenNothingIsSelected() {
-        stubSolver(KnapsackSolution.empty());
+        stubSolver(KnapsackSolution.empty(SOLUTION_ALGORITHM_NAME));
 
         OptimizationResultResponse response = service.optimize(assignmentExample());
 
@@ -296,9 +309,6 @@ class SubscriptionOptimizationServiceTest {
 
     private void stubSolver(KnapsackSolution solution) {
         when(solver.solve(anyList(), anyLong())).thenReturn(solution);
-        // Left unstubbed, name() returns null and the OptimizationRun constructor rejects
-        // it, so every run-producing case needs this regardless of what it asserts on.
-        when(solver.name()).thenReturn(SOLVER_NAME);
         // A default mock returns null and the service maps the saved entity into its
         // response, so save() must hand back what it was given.
         when(runRepository.save(any(OptimizationRun.class))).thenAnswer(invocation -> invocation.getArgument(0));
@@ -323,7 +333,7 @@ class SubscriptionOptimizationServiceTest {
                 new BigDecimal("320.00"),
                 2,
                 4,
-                SOLVER_NAME,
+                SOLUTION_ALGORITHM_NAME,
                 FIXED_NOW);
         run.addSubscription(new SubscriptionRequest(
                 "Investor A", new BigDecimal("5"), new BigDecimal("120"), true, 0));

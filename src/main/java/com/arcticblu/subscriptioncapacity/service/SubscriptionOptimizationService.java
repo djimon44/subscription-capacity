@@ -67,7 +67,7 @@ public class SubscriptionOptimizationService {
                 MinorUnits.toDecimal(solution.totalValue()),
                 solution.selectedIndices().size(),
                 candidates.size(),
-                solver.name(),
+                solution.algorithmName(),
                 Instant.now(clock));
 
         // Every candidate is persisted, accepted or not: the audit trail must show

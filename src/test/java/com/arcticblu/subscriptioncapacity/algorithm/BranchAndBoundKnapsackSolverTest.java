@@ -32,10 +32,16 @@ class BranchAndBoundKnapsackSolverTest {
     }
 
     @Test
-    @DisplayName("reports its own algorithm name")
-    void reportsAlgorithmName() {
-        assertThat(solver.name()).isEqualTo("BRANCH_AND_BOUND");
-        assertThat(solver.name().length()).isLessThanOrEqualTo(32);
+    @DisplayName("the returned solution names the algorithm that produced it")
+    void solutionNamesTheAlgorithm() {
+        assertThat(solver.solve(ASSIGNMENT_EXAMPLE, 15).algorithmName())
+                .isEqualTo("BRANCH_AND_BOUND");
+    }
+
+    @Test
+    @DisplayName("an empty solution names the algorithm too")
+    void emptySolutionNamesTheAlgorithm() {
+        assertThat(solver.solve(List.of(), 100).algorithmName()).isEqualTo("BRANCH_AND_BOUND");
     }
 
     @Test
