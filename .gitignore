@@ -34,4 +34,6 @@ build/
 
 # Local request fixtures for manual API testing
 request.json
+run2.json
+run3.json
 bad-*.json
