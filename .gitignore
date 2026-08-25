@@ -32,8 +32,7 @@ build/
 ### VS Code ###
 .vscode/
 
-# Local request fixtures for manual API testing
-request.json
-run2.json
-run3.json
-bad-*.json
+# Local scratch request bodies used for manual testing
+/request.json
+/run*.json
+/bad-*.json
