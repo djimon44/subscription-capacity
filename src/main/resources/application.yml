@@ -30,8 +30,20 @@ spring:
 arcticblu:
   optimization:
     # Dynamic programming is used while capacity <= maxTableCells / (itemCount + 1) - 1,
-    # with capacity expressed in minor units. Three tables are allocated (two long, one
-    # boolean) at 17 bytes per cell, so this ceiling corresponds to roughly 850 MB.
-    # Requests exceeding it fall through to branch and bound, which is not bounded by
-    # capacity, rather than being rejected.
-    max-table-cells: 50000000
+    # with capacity expressed in minor units.
+    #
+    # Memory arithmetic: a single request allocates three tables of maxTableCells cells,
+    # two long[][] at 8 bytes per cell and one boolean[][] at 1 byte, so 17 bytes per
+    # cell in total. At 10,000,000 cells that is roughly 170 MB for one request. The
+    # previous 50,000,000 allowed roughly 865 MB, which one request could claim on its
+    # own; an OutOfMemoryError is an Error rather than an Exception, so it would escape
+    # the RFC 9457 catch-all entirely.
+    #
+    # Exceeding the ceiling is not a rejection. Those problems fall through to branch and
+    # bound, whose cost depends on the candidate count rather than the capacity value, so
+    # a large capacity is still answered exactly.
+    #
+    # The value is a deliberate trade, not a safety margin: raising it lets dynamic
+    # programming cover more requests and so takes the exponential branch-and-bound path
+    # less often, at the price of a larger worst-case allocation for a single request.
+    max-table-cells: 10000000

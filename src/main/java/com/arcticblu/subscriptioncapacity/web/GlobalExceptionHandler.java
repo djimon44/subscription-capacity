@@ -5,14 +5,19 @@ import com.arcticblu.subscriptioncapacity.service.InvalidSubscriptionInputExcept
 import com.arcticblu.subscriptioncapacity.service.OptimizationRunNotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ProblemDetail;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
 import java.net.URI;
 import java.util.List;
@@ -24,9 +29,22 @@ import java.util.Map;
  * <p>Every failure carries a {@code type} URI identifying the class of problem and a
  * human-readable {@code detail}, so a client can tell a malformed payload from a
  * missing run without parsing prose.
+ *
+ * <p>Extending {@link ResponseEntityExceptionHandler} is what keeps Spring's own
+ * dispatch failures out of the {@link Exception} catch-all below. An unknown path, an
+ * unsupported method and an unsupported content type are all raised as exceptions by
+ * the dispatcher; handled generically they would each become a 500 with a full stack
+ * trace logged at ERROR, which turns an unauthenticated request loop into a
+ * log-flooding primitive. The base class already answers them with the correct status
+ * and an RFC 9457 body, and logs nothing at ERROR, so those cases are simply inherited.
+ *
+ * <p>The consequence is that any exception the base class declares must be handled by
+ * overriding its {@code protected} method rather than by adding a second
+ * {@code @ExceptionHandler} for the same type, which Spring would reject at startup as
+ * an ambiguous mapping.
  */
 @RestControllerAdvice
-public class GlobalExceptionHandler {
+public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
@@ -42,8 +60,13 @@ public class GlobalExceptionHandler {
             URI.create("https://arcticblu.example/problems/internal-error");
 
     /** Bean Validation failures on the request body, reported field by field. */
-    @ExceptionHandler(MethodArgumentNotValidException.class)
-    public ProblemDetail handleValidationFailure(MethodArgumentNotValidException exception) {
+    @Override
+    protected ResponseEntity<Object> handleMethodArgumentNotValid(
+            MethodArgumentNotValidException exception,
+            HttpHeaders headers,
+            HttpStatusCode status,
+            WebRequest request) {
+
         List<Map<String, String>> errors = exception.getBindingResult().getFieldErrors().stream()
                 .map(this::describeFieldError)
                 .toList();
@@ -54,7 +77,8 @@ public class GlobalExceptionHandler {
         problem.setTitle("Validation failed");
         problem.setType(TYPE_VALIDATION_FAILED);
         problem.setProperty("errors", errors);
-        return problem;
+
+        return handleExceptionInternal(exception, problem, headers, HttpStatus.BAD_REQUEST, request);
     }
 
     private Map<String, String> describeFieldError(FieldError error) {
@@ -64,17 +88,29 @@ public class GlobalExceptionHandler {
     }
 
     /** Body that is not valid JSON, or whose types cannot be bound. */
-    @ExceptionHandler(HttpMessageNotReadableException.class)
-    public ProblemDetail handleUnreadableBody(HttpMessageNotReadableException exception) {
+    @Override
+    protected ResponseEntity<Object> handleHttpMessageNotReadable(
+            HttpMessageNotReadableException exception,
+            HttpHeaders headers,
+            HttpStatusCode status,
+            WebRequest request) {
+
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(
                 HttpStatus.BAD_REQUEST,
                 "The request body could not be parsed as JSON matching the expected schema");
         problem.setTitle("Malformed request body");
         problem.setType(TYPE_MALFORMED_REQUEST);
-        return problem;
+
+        return handleExceptionInternal(exception, problem, headers, HttpStatus.BAD_REQUEST, request);
     }
 
-    /** A path variable or query parameter that cannot be converted, such as a bad UUID. */
+    /**
+     * A path variable or query parameter that cannot be converted, such as a bad UUID.
+     *
+     * <p>Registered as its own handler rather than as an override of the base class's
+     * {@code handleTypeMismatch}: this subtype is the only mismatch the API can produce,
+     * and it is the more specific mapping, so Spring prefers it.
+     */
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
     public ProblemDetail handleTypeMismatch(MethodArgumentTypeMismatchException exception) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(
@@ -117,6 +153,10 @@ public class GlobalExceptionHandler {
     /**
      * Anything unanticipated. The message is deliberately generic: internal details
      * are logged for operators, not returned to callers.
+     *
+     * <p>This is now genuinely a last resort. Every exception the base class declares
+     * is routed to a handler of its own before reaching here, so a stack trace at ERROR
+     * means a real defect rather than a caller typing the wrong URL.
      */
     @ExceptionHandler(Exception.class)
     public ProblemDetail handleUnexpectedFailure(Exception exception) {

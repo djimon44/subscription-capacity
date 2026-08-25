@@ -6,6 +6,7 @@ import com.arcticblu.subscriptioncapacity.web.dto.OptimizationRunSummary;
 import com.arcticblu.subscriptioncapacity.web.dto.OptimizeRequest;
 import com.arcticblu.subscriptioncapacity.web.dto.PagedResponse;
 import jakarta.validation.Valid;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -59,9 +60,22 @@ public class SubscriptionController {
         return optimizationService.findByRequestId(requestId);
     }
 
-    /** Returns the audit trail of past runs, newest first. */
+    /**
+     * Returns the audit trail of past runs.
+     *
+     * <p>The ordering is fixed: newest first, by creation time and then by identifier.
+     * A {@code sort} query parameter is accepted for compatibility with the standard
+     * pageable binding but is <em>not</em> honoured, and the resolved sort is discarded
+     * here rather than passed on. Forwarding it would achieve nothing useful and one
+     * concrete harm: the repository query already names its own ordering, so a
+     * recognised property such as {@code createdAt,asc} would be silently ignored,
+     * while an unrecognised one would reach Spring Data and fail with a
+     * {@code PropertyReferenceException} - a caller-supplied string turning a read into
+     * a 500. Only the page number and page size survive.
+     */
     @GetMapping
     public PagedResponse<OptimizationRunSummary> findAll(Pageable pageable) {
-        return optimizationService.findAll(pageable);
+        Pageable unsorted = PageRequest.of(pageable.getPageNumber(), pageable.getPageSize());
+        return optimizationService.findAll(unsorted);
     }
 }

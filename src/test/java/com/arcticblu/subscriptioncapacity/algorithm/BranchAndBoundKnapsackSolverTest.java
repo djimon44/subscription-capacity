@@ -15,6 +15,10 @@ class BranchAndBoundKnapsackSolverTest {
     private final KnapsackSolver solver = new BranchAndBoundKnapsackSolver();
     private final KnapsackSolver referenceSolver = new DynamicProgrammingKnapsackSolver();
 
+    /** Size and capacity of the flat-fee fixture the node-limit tests share. */
+    private static final int FLAT_FEE_COUNT = 18;
+    private static final long FLAT_FEE_CAPACITY = 8_550L;
+
     private static final List<KnapsackItem> ASSIGNMENT_EXAMPLE = List.of(
             new KnapsackItem(0, 5, 120),
             new KnapsackItem(1, 10, 200),
@@ -136,6 +140,103 @@ class BranchAndBoundKnapsackSolverTest {
                 .withMessageContaining("Combined item value");
     }
 
+    // --- density arithmetic --------------------------------------------------------
+
+    @Test
+    @DisplayName("candidates whose density product overflows a long are solved, not refused")
+    void solvesCandidatesWhoseDensityProductOverflowsALong() {
+        // 250,000,000.00 requested for a 5,000,000.00 fee, in minor units. Ordering by
+        // density cross-multiplies value by weight, which here is 1.25 x 10^19 and so
+        // past Long.MAX_VALUE, yet the request is well inside every documented limit.
+        long amount = 25_000_000_000L;
+        long fee = 500_000_000L;
+        long capacity = 30_000_000_000L;
+
+        List<KnapsackItem> items = List.of(
+                new KnapsackItem(0, amount, fee),
+                new KnapsackItem(1, amount, fee));
+
+        KnapsackSolution solution = solver.solve(items, capacity);
+
+        // The identical problem divided through by a million, which is small enough for
+        // a dynamic programming table and so can say what the answer must be.
+        long scale = 1_000_000L;
+        KnapsackSolution expected = referenceSolver.solve(
+                List.of(
+                        new KnapsackItem(0, amount / scale, fee / scale),
+                        new KnapsackItem(1, amount / scale, fee / scale)),
+                capacity / scale);
+
+        assertThat(solution.selectedIndices()).isEqualTo(expected.selectedIndices());
+        assertThat(solution.totalValue()).isEqualTo(expected.totalValue() * scale);
+        assertThat(solution.totalWeight()).isEqualTo(expected.totalWeight() * scale);
+    }
+
+    @Test
+    @DisplayName("an upper bound whose arithmetic overflows loosens the bound rather than failing")
+    void solvesWhenTheUpperBoundArithmeticOverflows() {
+        // The partial item's contribution is value x remaining, which is 10^28 here.
+        // Overflowing that must yield an unusably large bound, not a rejection.
+        long capacity = 3_000_000_000_000_000_000L;
+
+        List<KnapsackItem> items = List.of(
+                new KnapsackItem(0, 4_000_000_000_000_000_000L, 5_000_000_000L),
+                new KnapsackItem(1, 1_000_000_000_000_000_000L, 2_000_000_000L));
+
+        KnapsackSolution solution = solver.solve(items, capacity);
+
+        assertThat(solution.selectedIndices()).containsExactly(1);
+        assertThat(solution.totalValue()).isEqualTo(2_000_000_000L);
+        assertThat(solution.totalWeight()).isEqualTo(1_000_000_000_000_000_000L);
+    }
+
+    // --- the node limit ------------------------------------------------------------
+
+    @Test
+    @DisplayName("a small problem is solved well inside the default node limit")
+    void smallProblemIsUnaffectedByTheNodeLimit() {
+        List<KnapsackItem> items = flatFeeCandidates(FLAT_FEE_COUNT);
+
+        KnapsackSolution solution = solver.solve(items, FLAT_FEE_CAPACITY);
+
+        assertThat(solution.totalValue())
+                .isEqualTo(referenceSolver.solve(items, FLAT_FEE_CAPACITY).totalValue());
+        assertThat(solution.totalWeight()).isLessThanOrEqualTo(FLAT_FEE_CAPACITY);
+    }
+
+    @Test
+    @DisplayName("a problem the default limit solves is refused under a low one")
+    void refusesProblemThatExceedsTheConfiguredNodeLimit() {
+        List<KnapsackItem> items = flatFeeCandidates(FLAT_FEE_COUNT);
+
+        assertThat(solver.solve(items, FLAT_FEE_CAPACITY).totalValue()).isPositive();
+
+        assertThatExceptionOfType(ProblemTooLargeException.class)
+                .isThrownBy(() -> new BranchAndBoundKnapsackSolver(100L)
+                        .solve(items, FLAT_FEE_CAPACITY));
+    }
+
+    @Test
+    @DisplayName("the refusal names the configured limit and the item count")
+    void refusalNamesTheLimitAndTheItemCount() {
+        List<KnapsackItem> items = flatFeeCandidates(FLAT_FEE_COUNT);
+
+        assertThatExceptionOfType(ProblemTooLargeException.class)
+                .isThrownBy(() -> new BranchAndBoundKnapsackSolver(100L)
+                        .solve(items, FLAT_FEE_CAPACITY))
+                .withMessageContaining("could not be solved exactly")
+                .withMessageContaining("100")
+                .withMessageContaining("%d items".formatted(FLAT_FEE_COUNT));
+    }
+
+    @Test
+    @DisplayName("a non-positive node limit is rejected")
+    void rejectsNonPositiveNodeLimit() {
+        assertThatExceptionOfType(IllegalArgumentException.class)
+                .isThrownBy(() -> new BranchAndBoundKnapsackSolver(0L))
+                .withMessageContaining("0");
+    }
+
     @Test
     @DisplayName("agrees with dynamic programming on randomised problems")
     void agreesWithDynamicProgramming() {
@@ -183,6 +284,21 @@ class BranchAndBoundKnapsackSolverTest {
                     .as("trial %d, capacity %d, items %s", trial, capacity, items)
                     .isEqualTo(referenceSolver.solve(items, capacity).selectedIndices());
         }
+    }
+
+    /**
+     * Candidates that all share one value density, which is what a flat percentage fee
+     * schedule produces and the shape against which the fractional bound prunes nothing.
+     * At this size the full enumeration is a few hundred thousand nodes: far past the
+     * hundred-node limit the refusal tests configure, and far short of the default.
+     */
+    private static List<KnapsackItem> flatFeeCandidates(int count) {
+        List<KnapsackItem> items = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            long amount = 100L * (i + 1);
+            items.add(new KnapsackItem(i, amount, 2 * amount));
+        }
+        return items;
     }
 
     private static long sumWeights(List<KnapsackItem> items, KnapsackSolution solution) {

@@ -17,6 +17,7 @@ import org.springframework.boot.resttestclient.autoconfigure.AutoConfigureRestTe
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.client.RestTestClient;
 
@@ -297,6 +298,53 @@ class SubscriptionApiIntegrationTest {
         assertThat(firstPage.size()).isEqualTo(2);
         assertThat(firstPage.totalElements()).isEqualTo(3L);
         assertThat(firstPage.totalPages()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("an unrecognised sort value is ignored rather than failing the listing")
+    void ignoresUnrecognisedSortValue() {
+        storeRun(TEN_O_CLOCK, new BigDecimal("10"));
+        storeRun(ELEVEN_O_CLOCK, new BigDecimal("20"));
+        storeRun(TWELVE_O_CLOCK, new BigDecimal("30"));
+
+        // Passed through to Spring Data this would raise PropertyReferenceException and
+        // surface as a 500, which makes a caller-supplied string a denial of service.
+        PagedResponse<OptimizationRunSummary> listing = listing(LISTING_PATH + "?sort=doesNotExist");
+
+        assertThat(listing.content())
+                .extracting(OptimizationRunSummary::createdAt)
+                .containsExactly(TWELVE_O_CLOCK, ELEVEN_O_CLOCK, TEN_O_CLOCK);
+    }
+
+    // --- dispatch failures ---------------------------------------------------------
+
+    @Test
+    @DisplayName("an unknown path is reported as not found rather than as an internal error")
+    void reportsUnknownPathAsNotFound() {
+        client.get().uri("/api/v1/no-such-resource")
+                .exchange()
+                .expectStatus().isNotFound()
+                .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON);
+    }
+
+    @Test
+    @DisplayName("a method the collection does not support is reported as method not allowed")
+    void reportsUnsupportedMethodAsMethodNotAllowed() {
+        client.delete().uri(LISTING_PATH)
+                .exchange()
+                .expectStatus().isEqualTo(HttpStatus.METHOD_NOT_ALLOWED)
+                .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON);
+    }
+
+    @Test
+    @DisplayName("a body in a content type the endpoint cannot read is reported as unsupported media type")
+    void reportsUnsupportedContentTypeAsUnsupportedMediaType() {
+        client.post().uri(OPTIMIZE_PATH)
+                .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                .body("maxCapacity=15")
+                .exchange()
+                .expectStatus().isEqualTo(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
+                .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON);
     }
 
     // --- helpers -------------------------------------------------------------------

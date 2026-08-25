@@ -12,13 +12,13 @@ verbatim, from a file under `src/test/java` unless the surrounding text says oth
 
 ## 1. Overview
 
-The suite has **110 tests** in nine files, falling into three tiers.
+The suite has **120 tests** in nine files, falling into three tiers.
 
 | Tier | Files | Tests | Docker | Time |
 |---|---|---|---|---|
-| Pure unit | `KnapsackItemTest`, `KnapsackSolutionTest`, `DynamicProgrammingKnapsackSolverTest`, `BranchAndBoundKnapsackSolverTest`, `AdaptiveKnapsackSolverTest`, `MinorUnitsTest` | 74 | no | ≈ 0.4 s |
+| Pure unit | `KnapsackItemTest`, `KnapsackSolutionTest`, `DynamicProgrammingKnapsackSolverTest`, `BranchAndBoundKnapsackSolverTest`, `AdaptiveKnapsackSolverTest`, `MinorUnitsTest` | 80 | no | ≈ 0.4 s |
 | Unit with mocks | `SubscriptionOptimizationServiceTest` | 17 | no | ≈ 1.3 s |
-| Full-stack integration | `SubscriptionCapacityApplicationTests`, `SubscriptionApiIntegrationTest` | 19 | **yes** | ≈ 11 s |
+| Full-stack integration | `SubscriptionCapacityApplicationTests`, `SubscriptionApiIntegrationTest` | 23 | **yes** | ≈ 11 s |
 
 `./mvnw clean test` runs all three tiers and takes about 18 seconds end to end. Most of the
 integration cost is one-time: starting the PostgreSQL container and building the Spring
@@ -180,9 +180,10 @@ private static final long RANDOM_SEED = 20_250_821L;
 private final DynamicProgrammingKnapsackSolver solver = new DynamicProgrammingKnapsackSolver();
 ```
 
-The no-arg constructor uses `DEFAULT_MAX_TABLE_CELLS = 10_000_000`. That is *not* the value
-the running application uses — `application.yml` configures `max-table-cells: 50000000` — so
-the two ceiling tests construct their own bounded solvers instead of relying on the default.
+The no-arg constructor uses `DEFAULT_MAX_TABLE_CELLS = 10_000_000`, which `application.yml`
+now matches with `max-table-cells: 10000000` — roughly 170 MB per request at 17 bytes per
+cell. Either way the default is far too large to reach by hand, so the two ceiling tests
+construct their own bounded solvers rather than relying on it.
 
 The shared fixture is the assignment example, with a comment explaining what makes it a good
 test case:
@@ -311,7 +312,7 @@ left unnamed.
 
 The 25th test is `matchesBruteForceAcrossRandomisedProblems`, covered in §4.
 
-### 2.4 `algorithm/BranchAndBoundKnapsackSolverTest` — 13 tests
+### 2.4 `algorithm/BranchAndBoundKnapsackSolverTest` — 19 tests
 
 `BranchAndBoundKnapsackSolver` solves the same problem as the dynamic programming solver by
 a completely different route: a depth-first search over include/exclude decisions, pruned by
@@ -366,6 +367,39 @@ assert `"BRANCH_AND_BOUND"` on a solved problem and on the empty-list path respe
 These replaced an earlier test that asserted `solver.name()`; when the name moved onto the
 solution, the assertion had to move with it, and the empty path needed its own case for the
 reason given in §2.3.
+
+**Density arithmetic that must not refuse a valid request.** Ordering by density
+cross-multiplies value by weight, and that product overflows a `long` well inside the
+limits the API documents — around $215,000,000 per candidate at a 2% fee.
+`solvesCandidatesWhoseDensityProductOverflowsALong` uses two candidates of 25,000,000,000
+minor units against fees of 500,000,000, whose cross product is 1.25 × 10¹⁹, and asserts a
+solution rather than a `ProblemTooLargeException`. What that solution should be is not
+asserted by hand: the same problem is divided through by a million, which brings it inside
+a DP table, and the reference solver's answer is scaled back up. The comparison is therefore
+against an independent implementation rather than against arithmetic done in the test.
+
+`solvesWhenTheUpperBoundArithmeticOverflows` covers the other overflow site. The bound's
+partial-item term is `value × remaining`, which is 10²⁸ for that fixture. Overflowing it
+yields `Long.MAX_VALUE`, an overestimate, which prunes nothing and so cannot change the
+answer; the test asserts the exact optimum comes back anyway. An underestimate would be the
+dangerous direction, and no assertion on "no exception thrown" alone would have caught it.
+
+**The node limit.** Pruning is weakest when candidates share a value density, which is
+exactly what a flat percentage fee schedule produces, so `flatFeeCandidates` builds that
+worst case directly: 18 candidates whose fee is twice their amount.
+
+| Test | Solver | Expectation |
+|---|---|---|
+| `smallProblemIsUnaffectedByTheNodeLimit` | default limit | agrees with dynamic programming |
+| `refusesProblemThatExceedsTheConfiguredNodeLimit` | limit 100 | `ProblemTooLargeException` |
+| `refusalNamesTheLimitAndTheItemCount` | limit 100 | message names `100` and `18 items` |
+| `rejectsNonPositiveNodeLimit` | limit 0 | `IllegalArgumentException` |
+
+The first two are a matched pair on one fixture, and only the pair proves anything: the
+refusal test alone would pass against a solver that refused everything, so it first asserts
+the default solver solves the identical problem. A node count rather than a wall-clock
+timeout is what makes this testable at all — a 100-node ceiling fires at the same point on
+every machine and under any load, where a millisecond timeout would be a flake.
 
 **The two cross-solver property tests** — `agreesWithDynamicProgramming` and
 `selectsSameSubsetAsDynamicProgramming`, 1,000 trials each — are covered in §4. They are the
@@ -424,8 +458,8 @@ assertThatNoException().isThrownBy(() -> solver.solve(items, capacity));
 
 `solvesCapacityBeyondAnyFeasibleTable` states the user-visible promise directly: a capacity
 of 5 × 10⁹ minor units, far past any allocatable table, is *solved* rather than refused.
-Before the adaptive solver, this exact input produced `ProblemTooLargeException` and a `413`
-from the API. `solvesCapacityAtTheTopOfTheLongRange` pushes it to `Long.MAX_VALUE`, which is
+Before the adaptive solver, this exact input produced `ProblemTooLargeException`, which
+`GlobalExceptionHandler.handleProblemTooLarge` maps to a `400` from the API. `solvesCapacityAtTheTopOfTheLongRange` pushes it to `Long.MAX_VALUE`, which is
 the input most likely to overflow a carelessly written fit check; it asserts a correct answer
 rather than merely the absence of a crash.
 
@@ -714,7 +748,7 @@ public class TestcontainersConfiguration {
 	@Bean
 	@ServiceConnection
 	PostgreSQLContainer postgresContainer() {
-		return new PostgreSQLContainer(DockerImageName.parse("postgres:latest"));
+		return new PostgreSQLContainer(DockerImageName.parse("postgres:16-alpine"));
 	}
 }
 ```
@@ -724,9 +758,10 @@ applies only where it is explicitly `@Import`ed. `@ServiceConnection` is what re
 usual boilerplate; see §3.
 
 Two notes on this file. It is `public` so that `SubscriptionApiIntegrationTest`, which lives
-in the `web` subpackage, can name it in `@Import`. And `postgres:latest` is a floating tag,
-so the database version can change under the suite without any change to the repository.
-Pinning a major version would make the suite reproducible over time.
+in the `web` subpackage, can name it in `@Import`. And the image is pinned to
+`postgres:16-alpine`, the same tag `docker-compose.yml` runs. A floating `postgres:latest`
+would let the database version drift under the suite with no change to the repository, and
+would validate the schema against a version the application never runs on.
 
 `SubscriptionCapacityApplicationTests` is the single smoke test:
 
@@ -754,7 +789,7 @@ PostgreSQL:
 SpringApplication.from(SubscriptionCapacityApplication::main).with(TestcontainersConfiguration.class).run(args);
 ```
 
-### 2.9 `web/SubscriptionApiIntegrationTest` — 18 tests
+### 2.9 `web/SubscriptionApiIntegrationTest` — 22 tests
 
 The full stack: real HTTP over a real port, a real Spring context, and a real PostgreSQL
 container. Nothing is mocked.
@@ -869,7 +904,7 @@ three spaces rather than an empty string, so it exercises `@NotBlank` rather tha
 .body("{\"maxCapacity\": 15, \"availableSubscriptions\": [")
 ```
 
-**Listing and pagination (4 tests).**
+**Listing and pagination (5 tests).**
 
 - `listsRunsNewestFirst` — three runs written directly at 10:00, 11:00 and 12:00 with
   capacities 10, 20 and 30. Asserts `totalElements` 3, capacities in the order
@@ -879,6 +914,27 @@ three spaces rather than an empty string, so it exercises `@NotBlank` rather tha
   `spring.data.web.pageable.max-page-size` configured in `application.yml`.
 - `slicesResultsIntoPages` — `?page=0&size=2` over three stored runs gives 2 items,
   `totalPages` 2, `totalElements` 3.
+- `ignoresUnrecognisedSortValue` — `?sort=doesNotExist` returns **200** with the usual
+  newest-first order. The listing query names its own ordering, so the resolved `Sort` is
+  discarded in the controller; forwarding it would let a caller-supplied property name
+  reach Spring Data, raise `PropertyReferenceException`, and come back as a 500. The test
+  asserts the ordering rather than only the status, so it also pins that discarding the
+  sort did not disturb the ordering the endpoint promises.
+
+**Dispatch failures (3 tests).** Spring raises these before any controller method runs, and
+each asserts both the status and the `application/problem+json` body.
+
+| Test | Request | Expected |
+|---|---|---|
+| `reportsUnknownPathAsNotFound` | `GET /api/v1/no-such-resource` | 404 |
+| `reportsUnsupportedMethodAsMethodNotAllowed` | `DELETE` on the collection | 405 |
+| `reportsUnsupportedContentTypeAsUnsupportedMediaType` | form-encoded `POST` to optimize | 415 |
+
+All three previously returned 500 with a full stack trace logged at ERROR, because
+`@ExceptionHandler(Exception.class)` caught them. That made an unauthenticated request loop
+a log-flooding primitive as well as a wrong answer. `GlobalExceptionHandler` now extends
+`ResponseEntityExceptionHandler`, whose handlers produce the correct status and an RFC 9457
+body without logging; the catch-all is left for genuine defects.
 
 ---
 
@@ -1043,7 +1099,7 @@ container here is PostgreSQL:
 @Bean
 @ServiceConnection
 PostgreSQLContainer postgresContainer() {
-	return new PostgreSQLContainer(DockerImageName.parse("postgres:latest"));
+	return new PostgreSQLContainer(DockerImageName.parse("postgres:16-alpine"));
 }
 ```
 
@@ -1763,18 +1819,16 @@ Recorded honestly rather than argued away.
   programming solver's own randomised test, where the deterministic cases carry it instead.
 - **Nothing tests the adaptive solver under a ceiling large enough to matter.** The routing
   tests use ceilings of 10, 30, and 300 cells so the boundary is reachable by hand. The
-  configured production ceiling is 50,000,000, and no test allocates a table anywhere near
+  configured production ceiling is 10,000,000, and no test allocates a table anywhere near
   it; a defect that only appears at realistic memory pressure would not be caught here.
 - **The duplicated fit check is tested on both sides but not pinned together.** §2.5 tests
   the adaptive solver's condition and §2.3 tests the dynamic programming solver's, at the
   same boundary values. Nothing fails if a future change updates one and not the other —
   the two conditions are compared only by a reader.
-- **The branch-and-bound solver has no test for pathological search time.** Its worst case is
-  exponential, and every generated problem is at most 14 items. A capacity and item set
-  chosen adversarially could take far longer than any test would tolerate, and nothing bounds
-  or measures that.
-- **`postgres:latest` is a floating tag.** The database version can change under the suite
-  without any change to the repository.
+- **The branch-and-bound solver's search time is bounded but not measured.** The node limit
+  (§2.4) proves the search *stops*, and the flat-fee fixture proves it stops on the shape
+  that defeats pruning. Nothing asserts how long a refusal takes, or how close a realistic
+  1,000-candidate request comes to the ceiling; both are still judged by hand.
 - **`refusesIdentifierThatIsNotAUuid` never inspects the body.** It asserts status and
   content type and discards the result, so it would still pass if the problem document's
   `title` or `detail` regressed. The other rejection tests check the body.

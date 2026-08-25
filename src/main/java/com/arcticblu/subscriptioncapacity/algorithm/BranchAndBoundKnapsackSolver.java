@@ -1,5 +1,6 @@
 package com.arcticblu.subscriptioncapacity.algorithm;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -17,11 +18,45 @@ import java.util.Set;
  * incumbent solution early and so raises the threshold against which later subtrees
  * are pruned. Original item indices are carried through the sort and reported in the
  * solution, so callers never observe the reordering.
+ *
+ * <p><strong>Where pruning fails.</strong> The bound comes from a fractional
+ * relaxation, so it separates subtrees only to the extent that candidates differ in
+ * value density. When every candidate shares one density the relaxation is exact at
+ * every node, each bound ties the incumbent instead of falling below it, and the
+ * strict {@code <} test prunes nothing: the search degenerates into enumerating all
+ * 2^n subsets. That is not a contrived input. A flat percentage fee schedule produces
+ * exactly it, because fee revenue proportional to the requested amount gives every
+ * candidate the same value per unit of capacity. The realistic worst case for this
+ * application is therefore also the algorithm's worst case, and it arrives at
+ * candidate counts well inside the {@code @Size} limit the API accepts.
+ *
+ * <p><strong>Why a node limit.</strong> {@code maxSearchNodes} caps how many nodes the
+ * search may visit, which converts an otherwise unbounded exponential search into a
+ * fast and explicit rejection: the caller receives {@link ProblemTooLargeException} in
+ * bounded time rather than a request that occupies a thread indefinitely. A node count
+ * is preferred over a wall-clock timeout because it is deterministic, and therefore
+ * both testable and reproducible across machines and load.
  */
 public final class BranchAndBoundKnapsackSolver implements KnapsackSolver {
 
     /** Recorded on every solution this solver produces. */
     public static final String ALGORITHM_NAME = "BRANCH_AND_BOUND";
+
+    /** Node ceiling applied when none is configured. */
+    public static final long DEFAULT_MAX_SEARCH_NODES = 5_000_000L;
+
+    private final long maxSearchNodes;
+
+    public BranchAndBoundKnapsackSolver() {
+        this(DEFAULT_MAX_SEARCH_NODES);
+    }
+
+    public BranchAndBoundKnapsackSolver(long maxSearchNodes) {
+        if (maxSearchNodes < 1) {
+            throw new IllegalArgumentException("maxSearchNodes must be positive: " + maxSearchNodes);
+        }
+        this.maxSearchNodes = maxSearchNodes;
+    }
 
     @Override
     public KnapsackSolution solve(List<KnapsackItem> items, long capacity) {
@@ -38,7 +73,7 @@ public final class BranchAndBoundKnapsackSolver implements KnapsackSolver {
         List<KnapsackItem> ordered = new ArrayList<>(candidates);
         ordered.sort(BranchAndBoundKnapsackSolver::compareDensityDescending);
 
-        Search search = new Search(ordered, capacity);
+        Search search = new Search(ordered, capacity, maxSearchNodes);
         search.explore(0, 0L, 0L, new ArrayList<>());
 
         return search.toSolution();
@@ -49,7 +84,14 @@ public final class BranchAndBoundKnapsackSolver implements KnapsackSolver {
      *
      * <p>Densities are compared by cross-multiplication rather than division, so the
      * ordering is exact: {@code a/b > c/d} exactly when {@code a*d > c*b} for positive
-     * weights. Weightless items have unbounded density and sort first, ordered among
+     * weights. The two products are formed in {@link BigInteger}, so no pair of
+     * candidates can overflow the comparison. That matters because a request well
+     * inside every documented limit must not be refused on account of an internal
+     * sorting strategy. The comparator runs O(n log n) times in front of a search that
+     * is exponential in the worst case, so the cost of the wider arithmetic is
+     * irrelevant.
+     *
+     * <p>Weightless items have unbounded density and sort first, ordered among
      * themselves by descending value.
      */
     private static int compareDensityDescending(KnapsackItem left, KnapsackItem right) {
@@ -62,18 +104,12 @@ public final class BranchAndBoundKnapsackSolver implements KnapsackSolver {
         if (right.weight() == 0) {
             return 1;
         }
-        return Long.compare(
-                multiplyChecked(right.value(), left.weight()),
-                multiplyChecked(left.value(), right.weight()));
+        return product(right.value(), left.weight())
+                .compareTo(product(left.value(), right.weight()));
     }
 
-    private static long multiplyChecked(long left, long right) {
-        try {
-            return Math.multiplyExact(left, right);
-        } catch (ArithmeticException overflow) {
-            throw new ProblemTooLargeException(
-                    "Item values and weights are too large to order by density");
-        }
+    private static BigInteger product(long value, long weight) {
+        return BigInteger.valueOf(value).multiply(BigInteger.valueOf(weight));
     }
 
     private void requireTotalValueFitsInLong(List<KnapsackItem> candidates) {
@@ -93,14 +129,17 @@ public final class BranchAndBoundKnapsackSolver implements KnapsackSolver {
 
         private final List<KnapsackItem> ordered;
         private final long capacity;
+        private final long maxSearchNodes;
 
+        private long exploredNodes;
         private long bestValue;
         private long bestWeight;
         private List<Integer> bestSelection = List.of();
 
-        private Search(List<KnapsackItem> ordered, long capacity) {
+        private Search(List<KnapsackItem> ordered, long capacity, long maxSearchNodes) {
             this.ordered = ordered;
             this.capacity = capacity;
+            this.maxSearchNodes = maxSearchNodes;
         }
 
         /**
@@ -108,6 +147,15 @@ public final class BranchAndBoundKnapsackSolver implements KnapsackSolver {
          * already committed and the items chosen to reach this point.
          */
         private void explore(int depth, long value, long weight, List<Integer> chosen) {
+            // Every entry into this method is one node of the search tree, so counting
+            // here bounds the whole search however it happens to branch.
+            if (++exploredNodes > maxSearchNodes) {
+                throw new ProblemTooLargeException(
+                        ("Problem could not be solved exactly within the configured search "
+                                + "limit of %d nodes: %d items")
+                                .formatted(maxSearchNodes, ordered.size()));
+            }
+
             if (depth == ordered.size()) {
                 recordIfBetter(value, weight, chosen);
                 return;
@@ -158,9 +206,20 @@ public final class BranchAndBoundKnapsackSolver implements KnapsackSolver {
                 }
 
                 if (item.weight() > 0 && remaining > 0) {
-                    // ceil(value * remaining / weight), computed without division loss.
-                    long numerator = multiplyChecked(item.value(), remaining);
-                    bound += (numerator + item.weight() - 1) / item.weight();
+                    try {
+                        // ceil(value * remaining / weight), computed without division loss.
+                        long numerator = Math.multiplyExact(item.value(), remaining);
+                        bound += Math.addExact(numerator, item.weight() - 1) / item.weight();
+                    } catch (ArithmeticException overflow) {
+                        // The bound only has to be an overestimate, and Long.MAX_VALUE is
+                        // the largest one available: it can never fall below any reachable
+                        // value, so it prunes nothing and the search merely does more work
+                        // before returning the same exact optimum. Underestimating is the
+                        // dangerous direction, because it discards subtrees that may hold
+                        // the optimum; refusing the request is worse still, because the
+                        // input itself is perfectly valid.
+                        return Long.MAX_VALUE;
+                    }
                 }
                 break;
             }
