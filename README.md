@@ -179,7 +179,7 @@ erDiagram
 
     optimization_run {
         uuid id PK "public requestId"
-        numeric max_capacity "NUMERIC(19,2)"
+        numeric max_capacity "all money columns NUMERIC(19,2)"
         numeric total_requested_amount
         numeric total_fee_revenue
         integer accepted_count
@@ -361,9 +361,13 @@ Any subtree whose bound cannot improve on the incumbent is discarded without bei
 The bound is computed in integer arithmetic and rounded **up**:
 
 ```java
-// ceil(value * remaining / weight), computed without division loss.
-long numerator = Math.multiplyExact(item.value(), remaining);
-bound += Math.addExact(numerator, item.weight() - 1) / item.weight();
+try {
+    // ceil(value * remaining / weight), computed without division loss.
+    long numerator = Math.multiplyExact(item.value(), remaining);
+    bound += Math.addExact(numerator, item.weight() - 1) / item.weight();
+} catch (ArithmeticException overflow) {
+    return Long.MAX_VALUE;
+}
 ```
 
 Floating point here would be a correctness bug, not a style choice. A bound that comes in even
@@ -554,9 +558,11 @@ Testcontainers. The test container is pinned to `postgres:16-alpine`, the same t
 `docker-compose.yml` runs, so the suite validates against the database the application actually
 uses.
 
-The suite itself was validated by deliberately introducing bugs into a throwaway copy of the
-project — swapped counts, a hardcoded algorithm name, a wrong scale factor — and confirming the
-expected tests failed and which ones did not.
+The suite itself was validated by introducing bugs into the working tree one at a time —
+swapped counts, a hardcoded algorithm name, a wrong scale factor. For each, the suite was run,
+the failing tests were noted, and the change was reverted before the next one. Which tests did
+*not* fail was recorded too, and was the more informative half: it is what shows where a
+mutation slips past the tier that ought to catch it.
 
 `TESTING.md` covers the detail: what each file pins, the randomised cross-checks, and the
 design decisions behind the suite.
