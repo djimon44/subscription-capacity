@@ -42,13 +42,13 @@ curl -X POST http://localhost:8080/api/v1/subscriptions/optimize \
   }'
 ```
 
-On Windows, invoke `curl.exe` explicitly and pass the body from a file with `-d "@body.json"`.
-PowerShell aliases `curl` to `Invoke-WebRequest`, which takes different arguments, and its
-quoting rules mangle inline JSON.
+One note that applies to every `curl` example in this README: on Windows, invoke `curl.exe`
+explicitly and pass the body from a file with `-d "@body.json"`. PowerShell aliases `curl` to
+`Invoke-WebRequest`, which takes different arguments, and its quoting rules mangle inline
+JSON. The request above, using the copy committed at `examples/optimize-request.json`:
 
 ```
-curl.exe -X POST http://localhost:8080/api/v1/subscriptions/optimize ^
-  -H "Content-Type: application/json" -d "@examples/optimize-request.json"
+curl.exe -X POST http://localhost:8080/api/v1/subscriptions/optimize -H "Content-Type: application/json" -d "@examples/optimize-request.json"
 ```
 
 ## API
@@ -57,7 +57,21 @@ Three endpoints, all under `/api/v1/subscriptions`.
 
 ### POST /api/v1/subscriptions/optimize — 201 Created
 
-Runs the allocation and persists it. The request above returns:
+Runs the allocation and persists it.
+
+```
+curl -X POST http://localhost:8080/api/v1/subscriptions/optimize \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "maxCapacity": 15,
+    "availableSubscriptions": [
+      {"investorName": "Investor A", "requestedAmount": 5,  "feeRevenue": 120},
+      {"investorName": "Investor B", "requestedAmount": 10, "feeRevenue": 200},
+      {"investorName": "Investor C", "requestedAmount": 3,  "feeRevenue": 80},
+      {"investorName": "Investor D", "requestedAmount": 8,  "feeRevenue": 160}
+    ]
+  }'
+```
 
 ```json
 {"requestId":"3691981f-d259-49be-834e-251e6171f5e3","acceptedSubscriptions":[{"investorName":"Investor A","requestedAmount":5.00,"feeRevenue":120.00},{"investorName":"Investor B","requestedAmount":10.00,"feeRevenue":200.00}],"totalRequestedAmount":15.00,"totalFeeRevenue":320.00,"createdAt":"2026-08-25T10:21:01.235Z"}
@@ -69,6 +83,17 @@ client need not assemble the URL from the `requestId` itself.
 
 A run in which nothing fits is a successful run, not an error. With `maxCapacity` 5 and a
 single candidate requesting 50:
+
+```
+curl -X POST http://localhost:8080/api/v1/subscriptions/optimize \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "maxCapacity": 5,
+    "availableSubscriptions": [
+      {"investorName": "Investor A", "requestedAmount": 50, "feeRevenue": 1200}
+    ]
+  }'
+```
 
 ```json
 {"requestId":"4eb02201-5432-4264-92c5-858fc38108ad","acceptedSubscriptions":[],"totalRequestedAmount":0.00,"totalFeeRevenue":0.00,"createdAt":"2026-08-25T10:24:53.097Z"}
