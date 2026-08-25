@@ -108,6 +108,11 @@ Still 201, still persisted, with an empty list and zero totals. See
 curl http://localhost:8080/api/v1/subscriptions/3691981f-d259-49be-834e-251e6171f5e3
 ```
 
+Substitute a `requestId` of your own. That one exists only in the database these examples were
+captured against, so copying it verbatim returns 404. Every POST to `/optimize` generates a
+fresh identifier and reports it twice: as `requestId` in the response body, and as the last
+path segment of the `Location` header.
+
 Returns exactly the document the create returned — same fields, same values, same `createdAt`
 down to the millisecond. This is not incidental: `readsBackExactlyWhatTheCreateReturned` in
 `SubscriptionApiIntegrationTest` performs the POST, performs the GET, and asserts the two
