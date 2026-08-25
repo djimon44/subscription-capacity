@@ -46,6 +46,11 @@ On Windows, invoke `curl.exe` explicitly and pass the body from a file with `-d 
 PowerShell aliases `curl` to `Invoke-WebRequest`, which takes different arguments, and its
 quoting rules mangle inline JSON.
 
+```
+curl.exe -X POST http://localhost:8080/api/v1/subscriptions/optimize ^
+  -H "Content-Type: application/json" -d "@examples/optimize-request.json"
+```
+
 ## API
 
 Three endpoints, all under `/api/v1/subscriptions`.
