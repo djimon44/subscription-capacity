@@ -5,6 +5,7 @@ import com.arcticblu.subscriptioncapacity.service.InvalidSubscriptionInputExcept
 import com.arcticblu.subscriptioncapacity.service.OptimizationRunNotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
@@ -56,6 +57,8 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
             URI.create("https://arcticblu.example/problems/problem-too-large");
     private static final URI TYPE_RUN_NOT_FOUND =
             URI.create("https://arcticblu.example/problems/run-not-found");
+    private static final URI TYPE_CARRIED_FORWARD_CONFLICT =
+            URI.create("https://arcticblu.example/problems/carried-forward-conflict");
     private static final URI TYPE_INTERNAL_ERROR =
             URI.create("https://arcticblu.example/problems/internal-error");
 
@@ -148,6 +151,20 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         problem.setTitle("Optimization run not found");
         problem.setType(TYPE_RUN_NOT_FOUND);
         return problem;
+    }
+
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ProblemDetail handleCarriedForwardConflict(DataIntegrityViolationException exception) throws Exception {
+        if (exception.getMessage() != null && exception.getMessage().contains("uq_subscription_request_carried_from")) {
+            ProblemDetail problem = ProblemDetail.forStatusAndDetail(
+                    HttpStatus.CONFLICT,
+                    "A carried-forward candidate in this request was claimed by a concurrent "
+                            + "run. Retry the request.");
+            problem.setTitle("Carried-forward candidate claimed concurrently");
+            problem.setType(TYPE_CARRIED_FORWARD_CONFLICT);
+            return problem;
+        }
+        throw exception; // Let other constraint violations fall through
     }
 
     /**

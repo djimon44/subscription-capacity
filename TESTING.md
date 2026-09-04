@@ -12,13 +12,13 @@ verbatim, from a file under `src/test/java` unless the surrounding text says oth
 
 ## 1. Overview
 
-The suite has **120 tests** in nine files, falling into three tiers.
+The suite has **132 tests** in nine files, falling into three tiers.
 
 | Tier | Files | Tests | Docker | Time |
 |---|---|---|---|---|
-| Pure unit | `KnapsackItemTest`, `KnapsackSolutionTest`, `DynamicProgrammingKnapsackSolverTest`, `BranchAndBoundKnapsackSolverTest`, `AdaptiveKnapsackSolverTest`, `MinorUnitsTest` | 80 | no | ≈ 0.4 s |
-| Unit with mocks | `SubscriptionOptimizationServiceTest` | 17 | no | ≈ 1.3 s |
-| Full-stack integration | `SubscriptionCapacityApplicationTests`, `SubscriptionApiIntegrationTest` | 23 | **yes** | ≈ 11 s |
+| Pure unit | `KnapsackItemTest`, `KnapsackSolutionTest`, `DynamicProgrammingKnapsackSolverTest`, `BranchAndBoundKnapsackSolverTest`, `AdaptiveKnapsackSolverTest`, `MinorUnitsTest` | 81 | no | ≈ 0.4 s |
+| Unit with mocks | `SubscriptionOptimizationServiceTest` | 23 | no | ≈ 1.4 s |
+| Full-stack integration | `SubscriptionCapacityApplicationTests`, `SubscriptionApiIntegrationTest` | 28 | **yes** | ≈ 12 s |
 
 `./mvnw clean test` runs all three tiers and takes about 18 seconds end to end. Most of the
 integration cost is one-time: starting the PostgreSQL container and building the Spring
@@ -166,7 +166,7 @@ name here turns a `DataIntegrityViolationException` from PostgreSQL — thrown d
 flush, after the solver has already done its work — into an immediate, clearly worded
 failure at the point of construction.
 
-### 2.3 `algorithm/DynamicProgrammingKnapsackSolverTest` — 25 tests
+### 2.3 `algorithm/DynamicProgrammingKnapsackSolverTest` — 26 tests
 
 The largest and most important unit test file. It covers the exact 0/1 knapsack solver.
 
@@ -228,6 +228,30 @@ heuristic really was implemented and really did produce its best answer, so the 
 is not accidentally vacuous. The helper compares densities by cross-multiplication rather
 than division to stay in exact integer arithmetic, and its Javadoc is explicit that this
 assumes positive weights and modest values.
+
+**The carry-forward counterexample.** `solvesCarryForwardPoolBetterThanATwoStageDesign` is
+not about this solver's correctness — that is already established by §4.1 — it exists to pin
+a design decision one layer up, in `SubscriptionOptimizationService`. Capacity 10, new
+candidate X(10, 100), carried-forward Y(5, 80) and Z(5, 80):
+
+```java
+List<KnapsackItem> pool = List.of(
+        new KnapsackItem(0, 10, 100), // X, new
+        new KnapsackItem(1, 5, 80),   // Y, carried forward
+        new KnapsackItem(2, 5, 80));  // Z, carried forward
+
+KnapsackSolution solution = solver.solve(pool, 10);
+
+assertThat(solution.selectedIndices()).containsExactly(1, 2);
+assertThat(solution.totalValue()).isEqualTo(160);
+```
+
+A two-stage implementation — optimise the new candidates first, then fill whatever capacity
+is left with carried-forward ones — would take X for 100 and have nothing left for Y or Z.
+Solving the whole pool at once takes Y and Z instead, for 160. The service already does the
+right thing, building one candidate list and calling the solver once (§2.7); this test is
+what stops a future edit from "simplifying" that back into two stages, since the solver
+itself has always solved the pool correctly and could not otherwise reveal that regression.
 
 **Index handling.** `echoesItemIndicesRatherThanListPositions` uses items with indices
 `10, 20, 30, 40` in list positions `0..3` and asserts the solution reports `10, 20`. The
@@ -562,7 +586,7 @@ the same for `0.00`.
 `100` — each asserting `toDecimal(toMinorUnits(x))` compares equal to `x`. The `100` case is
 there to close the negative-scale loop from earlier.
 
-### 2.7 `service/SubscriptionOptimizationServiceTest` — 17 tests
+### 2.7 `service/SubscriptionOptimizationServiceTest` — 23 tests
 
 A plain Mockito test with no Spring context. This is the tier that checks *orchestration*:
 what the service passes to the solver, what it builds to persist, and what it returns.
@@ -577,11 +601,16 @@ private static final String SOLUTION_ALGORITHM_NAME = "TEST_ALGORITHM";
 private static final KnapsackSolution ASSIGNMENT_SOLUTION =
         new KnapsackSolution(SOLUTION_ALGORITHM_NAME, List.of(0, 1), 1500L, 32000L);
 
+private static final OptimizationProperties PROPERTIES = new OptimizationProperties(10_000_000, 100);
+
 @Mock
 private KnapsackSolver solver;
 
 @Mock
 private OptimizationRunRepository runRepository;
+
+@Mock
+private SubscriptionRequestRepository subscriptionRequestRepository;
 
 @Mock
 private PlatformTransactionManager transactionManager;
@@ -590,15 +619,23 @@ private SubscriptionOptimizationService service;
 
 @BeforeEach
 void createService() {
-    service = new SubscriptionOptimizationService(
-            solver, runRepository, Clock.fixed(FIXED_NOW, ZoneOffset.UTC), transactionManager);
+    service = new SubscriptionOptimizationService(solver, runRepository, subscriptionRequestRepository,
+            PROPERTIES, Clock.fixed(FIXED_NOW, ZoneOffset.UTC), transactionManager);
 }
 ```
 
 The service is constructed by hand. Nothing here needs a Spring context: the class has one
-constructor and four collaborators, so `new` is faster, more explicit, and cannot break
-because of an unrelated bean. The fourth of those collaborators is a transaction manager —
-see §5.8 for why the service takes one at all.
+constructor and six collaborators, so `new` is faster, more explicit, and cannot break
+because of an unrelated bean. The transaction manager is explained in §5.8; the carry-forward
+repository and `PROPERTIES` are new here — `PROPERTIES` is a real `OptimizationProperties`
+record rather than a mock, because a record with two `int` fields has nothing worth stubbing
+and constructing one directly is simpler than programming a mock to answer two getters.
+
+Note what is *not* stubbed by default: `subscriptionRequestRepository.findEligibleCarryForwardCandidates`
+is left untouched by every test that does not care about carry-forward. An unstubbed Mockito
+mock returns the type's empty collection for a `List`-returning method rather than `null`, so
+those tests exercise the same code path as `includeCarriedForward: false` would, without
+having to say so — they simply never populate the carried side of the pool.
 
 Note that `ASSIGNMENT_SOLUTION` is a *canned* answer. This file does not test whether
 `(0, 1)` is the right selection — `DynamicProgrammingKnapsackSolverTest` did that. Here the
@@ -710,6 +747,40 @@ verifyNoInteractions(runRepository);
     The exception alone would not prove the ordering. These two lines are what pin that
     validation happens *before* any expensive or persistent work.
 
+**The carry-forward cases (6).** Two small fixture helpers support these: `priorRun(UUID)`
+builds a stand-alone `OptimizationRun` — a stand-in for an earlier funding window — and
+`declinedCandidate(priorRun, name, amount, fee, inputIndex)` builds a declined
+`SubscriptionRequest`, attaches it to that run via `addSubscription`, and returns it. Neither
+entity is ever saved; they exist only to be handed back from a stubbed
+`findEligibleCarryForwardCandidates` call, exactly as the real repository would return them.
+
+1. `appendsCarriedCandidatesAfterNewOnes` — stubs one carried candidate alongside the
+   four-investor `assignmentExample()`, and asserts the captured item list has five entries,
+   with the carried one at index 4 and its weight and value scaled to minor units correctly.
+   This is the ordering the pooled-list design depends on: new candidates occupy indices
+   `0..n-1` in submission order, and carried ones follow from index `n`.
+2. `solvesThePoolInOneCall` — the same setup, asserting `verify(solver, times(1)).solve(...)`.
+   A regression here would mean someone reintroduced the two-stage design the counterexample
+   in `DynamicProgrammingKnapsackSolverTest` (§2.3) exists to catch.
+3. `excludesCarriedForwardCandidatesWhenDisabled` — `assignmentExample(false)`, and asserts
+   both that the captured item list has exactly four entries and, via
+   `verifyNoInteractions(subscriptionRequestRepository)`, that the repository is never even
+   asked. The second assertion is the stronger one: a pool of the right size could still be
+   produced by a bug that queries and then discards the result.
+4. `absentIncludeCarriedForwardBehavesAsTrue` — constructs an `OptimizeRequest` with a `null`
+   third argument, first asserting `request.includeCarriedForward()` is `true` (pinning the
+   compact constructor's normalisation in isolation), then asserting the service actually
+   queries the repository when given that request. Two assertions because the DTO's own
+   behaviour and the service's use of it are two different things that could each break.
+5. `candidateCountCountsTheWholePool` — one carried candidate added to the four-investor
+   example, asserts `capturedRun().getCandidateCount()` is 5, not 4. A regression here would
+   silently understate how many candidates a run actually considered.
+6. `tracksCarriedFromOnlyOnCarriedRows` — asserts the four new-candidate rows all have a
+   `null` `carriedFrom` and the fifth, carried row's `carriedFrom` `isSameAs` the stubbed
+   candidate object — identity, not equality, because `SubscriptionRequest.equals` returns
+   `false` for an entity with a `null` id (see the `storedRun` note above), so `isSameAs` is
+   the only assertion that could not pass vacuously here.
+
 **The `findByRequestId` cases (2).** `returnsStoredRunWithAcceptedSubscriptions` stubs
 `findByIdWithSubscriptions` with `Optional.of(storedRun(requestId))` and asserts the mapped
 response — id, the two accepted names, both totals, and `createdAt`.
@@ -789,7 +860,7 @@ PostgreSQL:
 SpringApplication.from(SubscriptionCapacityApplication::main).with(TestcontainersConfiguration.class).run(args);
 ```
 
-### 2.9 `web/SubscriptionApiIntegrationTest` — 22 tests
+### 2.9 `web/SubscriptionApiIntegrationTest` — 27 tests
 
 The full stack: real HTTP over a real port, a real Spring context, and a real PostgreSQL
 container. Nothing is mocked.
@@ -803,7 +874,7 @@ container. Nothing is mocked.
 class SubscriptionApiIntegrationTest {
 ```
 
-Path constants, three fixed timestamps, and two `ParameterizedTypeReference` constants
+Path constants, three fixed timestamps, and three `ParameterizedTypeReference` constants
 needed because generic response types are erased at runtime:
 
 ```java
@@ -819,6 +890,17 @@ private static final ParameterizedTypeReference<Map<String, Object>> PROBLEM =
 private static final ParameterizedTypeReference<PagedResponse<OptimizationRunSummary>> LISTING =
         new ParameterizedTypeReference<>() {
         };
+
+private static final ParameterizedTypeReference<Map<String, Object>> RESULT_AS_MAP =
+        new ParameterizedTypeReference<>() {
+        };
+```
+
+`RESULT_AS_MAP` has the exact same type as `PROBLEM` — both are just `Map<String, Object>` —
+but a separate constant with its own name is kept for a successful body, since the two exist
+for different reasons: `PROBLEM` is used because the shape of an error document is not worth
+a dedicated type, `RESULT_AS_MAP` because a typed `OptimizationResultResponse` cannot
+distinguish an absent JSON key from an explicit `null` (see the carry-forward section below).
 ```
 
 Two injected collaborators and the cleanup hook:
@@ -830,15 +912,27 @@ RestTestClient client;
 @Autowired
 OptimizationRunRepository runRepository;
 
+@Autowired
+JdbcTemplate jdbcTemplate;
+
 // The server serves requests on its own threads, so a test-managed transaction would
 // not cover them; state is cleared outright instead of rolled back.
 @BeforeEach
 void clearRuns() {
+    jdbcTemplate.update("UPDATE subscription_request SET carried_from_id = NULL WHERE carried_from_id IS NOT NULL");
     runRepository.deleteAll();
 }
 ```
 
-See §5.2 for why rollback is not used.
+See §5.2 for why rollback is not used. The `jdbcTemplate` line is new, and exists only
+because of `carried_from_id`: that self-reference is `RESTRICT`, not `CASCADE` (V4), and a
+carry-forward test can leave one run's declined row pointed at by a copy in a later run.
+`runRepository.deleteAll()` removes runs one at a time with no guarantee about order, so if
+it reaches the earlier run first, the database refuses to delete a row a later one still
+references. Breaking every `carried_from_id` link first — a plain SQL update, not routed
+through Hibernate — removes the dependency before `deleteAll()` has to navigate it, so the
+runs (and, via the pre-existing `run_id` cascade, their `subscription_request` rows) can then
+be removed in any order.
 
 **Helpers.** `optimize(OptimizeRequest)` performs the POST and unwraps a 201 body;
 `listing(String uri)` performs the GET and unwraps the paged envelope;
@@ -920,6 +1014,52 @@ three spaces rather than an empty string, so it exercises `@NotBlank` rather tha
   reach Spring Data, raise `PropertyReferenceException`, and come back as a 500. The test
   asserts the ordering rather than only the status, so it also pins that discarding the
   sort did not disturb the ordering the endpoint promises.
+
+**Carry-forward (5 tests).** These run real POSTs against the real database — nothing is
+constructed by hand and inserted directly — so a chain of two or three runs is built by
+calling `optimize(...)` repeatedly within one test, exactly as a caller would.
+
+- `carryForwardEligibilityFollowsTheDeclinedAndNotYetCopiedRule` is the load-bearing test in
+  this group: it walks all three rows of the eligibility table from the README's design
+  section in one scenario. Run 1 (the assignment example) declines Investor C and D. Run 2,
+  capacity 3 with one new candidate that cannot fit, accepts only the carried Investor C —
+  and, because Investor D was offered but not accepted, run 2 now holds a *copy* of D too,
+  declined again. Run 3, capacity 200 (comfortably more than everything still eligible),
+  is used as a detector: since every eligible candidate is accepted at that capacity, an
+  investor's *absence* from run 3's response proves they were not offered. Investor C is
+  absent (carried and accepted, so excluded twice over); Investor D and Investor Y (a new
+  candidate in run 2 that was itself declined there) are both present, and their
+  `originalRequestId` values are asserted to be run 2's id, not run 1's — proving the row
+  offered was the copy, not the original, for D, and that a fresh decline is eligible in its
+  own right, for Y.
+- `omitsOriginalRequestIdInJsonForNewCandidatesOnly` checks the JSON directly, via
+  `RESULT_AS_MAP` rather than `OptimizationResultResponse`, because `originalRequestId`'s
+  `@JsonInclude(NON_NULL)` is a claim about the *wire format* — that the key is absent, not
+  merely `null` — which a `Map<String, Object>` deserialisation can distinguish and a typed
+  DTO field cannot: a missing JSON key and an explicit `null` both come back as Java `null`
+  once bound to a record component.
+- `originalRunIsUnchangedAfterOneOfItsDeclinedCandidatesIsCarriedForward` is the test for the
+  central guarantee of the whole design. After Investor C is carried from run 1 into run 2
+  and accepted there, run 1 is reloaded from the database and asserted unchanged on every
+  axis that carrying forward could plausibly have touched: `totalRequestedAmount`,
+  `totalFeeRevenue`, `acceptedCount`, `candidateCount`, and — most directly — that the
+  original Investor C row is still `accepted = false`. Nothing about accepting a candidate
+  in a *later* run is allowed to rewrite what an *earlier* run reported.
+- `boundsThePoolAtTheConfiguredCarryForwardLimit` creates 105 declined candidates in a single
+  request (capacity 0, so all 105 are declined — `@Size(max = 1000)` easily admits this in
+  one POST) and then a second run with one new candidate, also declined. The second run's
+  `candidateCount`, read back through the listing endpoint, is asserted to be exactly 101 —
+  1 new plus the `max-carried-forward-candidates: 100` ceiling from `application.yml` — not
+  106, which is what it would be if the limit were not applied.
+- `weighsTheWholePoolOnTheTwoRequestWorkedExample` encodes the two-request example from the
+  top of the carry-forward specification: run 1 as the assignment example, run 2 at capacity
+  22 with new candidates A1(5, 120), B2(10, 200), C2(8, 160) plus carried C(3, 80) and D(8,
+  160). Deliberately does not assert a specific selection — the specification is explicit
+  that the solver decides — and instead asserts only what must be true of whatever comes
+  back: the accepted amounts and fees sum to the reported totals, the capacity constraint
+  holds, and the total fee is at least 440, the value of the known-feasible B2+C2+C
+  combination the specification calls out (A1+B2+C2 alone is 23, over capacity, so that
+  three-new-candidate combination is not an option regardless of what the solver picks).
 
 **Dispatch failures (3 tests).** Spring raises these before any controller method runs, and
 each asserts both the status and the `application/problem+json` body.
@@ -1237,7 +1377,7 @@ one real defect these cross-checks have found so far lived in exactly such an it
 
 The ranges are chosen so brute force stays affordable. Twelve items is 4096 subsets, and the
 DP table is at most 13 × 40 = 520 cells, so the whole 500-trial loop runs in a fraction of a
-second — the entire class, all 25 tests, completes in under a tenth of a second.
+second — the entire class, all 26 tests, completes in under a tenth of a second.
 
 #### How brute force works
 

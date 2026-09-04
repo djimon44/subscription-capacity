@@ -3,9 +3,12 @@ package com.arcticblu.subscriptioncapacity.service;
 import com.arcticblu.subscriptioncapacity.algorithm.KnapsackItem;
 import com.arcticblu.subscriptioncapacity.algorithm.KnapsackSolution;
 import com.arcticblu.subscriptioncapacity.algorithm.KnapsackSolver;
+import com.arcticblu.subscriptioncapacity.config.OptimizationProperties;
 import com.arcticblu.subscriptioncapacity.domain.OptimizationRun;
 import com.arcticblu.subscriptioncapacity.domain.SubscriptionRequest;
 import com.arcticblu.subscriptioncapacity.repository.OptimizationRunRepository;
+import com.arcticblu.subscriptioncapacity.repository.SubscriptionRequestRepository;
+import com.arcticblu.subscriptioncapacity.web.dto.AcceptedSubscription;
 import com.arcticblu.subscriptioncapacity.web.dto.OptimizationResultResponse;
 import com.arcticblu.subscriptioncapacity.web.dto.OptimizationRunSummary;
 import com.arcticblu.subscriptioncapacity.web.dto.OptimizeRequest;
@@ -21,6 +24,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.SimpleTransactionStatus;
 
@@ -39,6 +43,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -53,11 +58,16 @@ class SubscriptionOptimizationServiceTest {
     private static final KnapsackSolution ASSIGNMENT_SOLUTION =
             new KnapsackSolution(SOLUTION_ALGORITHM_NAME, List.of(0, 1), 1500L, 32000L);
 
+    private static final OptimizationProperties PROPERTIES = new OptimizationProperties(10_000_000, 100);
+
     @Mock
     private KnapsackSolver solver;
 
     @Mock
     private OptimizationRunRepository runRepository;
+
+    @Mock
+    private SubscriptionRequestRepository subscriptionRequestRepository;
 
     @Mock
     private PlatformTransactionManager transactionManager;
@@ -66,8 +76,8 @@ class SubscriptionOptimizationServiceTest {
 
     @BeforeEach
     void createService() {
-        service = new SubscriptionOptimizationService(
-                solver, runRepository, Clock.fixed(FIXED_NOW, ZoneOffset.UTC), transactionManager);
+        service = new SubscriptionOptimizationService(solver, runRepository, subscriptionRequestRepository,
+                PROPERTIES, Clock.fixed(FIXED_NOW, ZoneOffset.UTC), transactionManager);
     }
 
     // --- optimize ------------------------------------------------------------------
@@ -97,7 +107,8 @@ class SubscriptionOptimizationServiceTest {
                         new SubscriptionRequestPayload("Investor A", new BigDecimal("5.25"), new BigDecimal("120")),
                         new SubscriptionRequestPayload("Investor B", new BigDecimal("10"), new BigDecimal("200")),
                         new SubscriptionRequestPayload("Investor C", new BigDecimal("3"), new BigDecimal("80")),
-                        new SubscriptionRequestPayload("Investor D", new BigDecimal("8"), new BigDecimal("160")))));
+                        new SubscriptionRequestPayload("Investor D", new BigDecimal("8"), new BigDecimal("160"))),
+                true));
 
         assertThat(capturedCapacity()).isEqualTo(1575L);
         assertThat(capturedItems().getFirst().weight()).isEqualTo(525L);
@@ -213,7 +224,7 @@ class SubscriptionOptimizationServiceTest {
         OptimizationResultResponse response = service.optimize(assignmentExample());
 
         assertThat(response.acceptedSubscriptions())
-                .extracting(SubscriptionRequestPayload::investorName)
+                .extracting(AcceptedSubscription::investorName)
                 .containsExactly("Investor A", "Investor B");
     }
 
@@ -241,13 +252,101 @@ class SubscriptionOptimizationServiceTest {
         OptimizeRequest request = new OptimizeRequest(
                 new BigDecimal("15"),
                 List.of(new SubscriptionRequestPayload(
-                        "Investor A", new BigDecimal("5.123"), new BigDecimal("120"))));
+                        "Investor A", new BigDecimal("5.123"), new BigDecimal("120"))),
+                true);
 
         assertThatExceptionOfType(InvalidSubscriptionInputException.class)
                 .isThrownBy(() -> service.optimize(request));
 
         verify(solver, never()).solve(anyList(), anyLong());
         verifyNoInteractions(runRepository);
+    }
+
+    // --- carry-forward ---------------------------------------------------------------
+
+    @Test
+    @DisplayName("eligible carried-forward candidates are appended to the pool after the new ones")
+    void appendsCarriedCandidatesAfterNewOnes() {
+        SubscriptionRequest carried = declinedCandidate(
+                priorRun(UUID.randomUUID()), "Investor E", new BigDecimal("3"), new BigDecimal("80"), 2);
+        when(subscriptionRequestRepository.findEligibleCarryForwardCandidates(any(Pageable.class)))
+                .thenReturn(List.of(carried));
+        stubSolver(ASSIGNMENT_SOLUTION);
+
+        service.optimize(assignmentExample());
+
+        assertThat(capturedItems()).hasSize(5);
+        assertThat(capturedItems().get(4).index()).isEqualTo(4);
+        assertThat(capturedItems().get(4).weight()).isEqualTo(300L);
+        assertThat(capturedItems().get(4).value()).isEqualTo(8_000L);
+    }
+
+    @Test
+    @DisplayName("the pooled candidates, new and carried together, are solved in a single call")
+    void solvesThePoolInOneCall() {
+        SubscriptionRequest carried = declinedCandidate(
+                priorRun(UUID.randomUUID()), "Investor E", new BigDecimal("3"), new BigDecimal("80"), 2);
+        when(subscriptionRequestRepository.findEligibleCarryForwardCandidates(any(Pageable.class)))
+                .thenReturn(List.of(carried));
+        stubSolver(ASSIGNMENT_SOLUTION);
+
+        service.optimize(assignmentExample());
+
+        verify(solver, times(1)).solve(anyList(), anyLong());
+    }
+
+    @Test
+    @DisplayName("includeCarriedForward false means the repository is never queried and the pool is the new candidates alone")
+    void excludesCarriedForwardCandidatesWhenDisabled() {
+        stubSolver(ASSIGNMENT_SOLUTION);
+
+        service.optimize(assignmentExample(false));
+
+        assertThat(capturedItems()).hasSize(4);
+        verifyNoInteractions(subscriptionRequestRepository);
+    }
+
+    @Test
+    @DisplayName("an absent includeCarriedForward field behaves as true")
+    void absentIncludeCarriedForwardBehavesAsTrue() {
+        OptimizeRequest request = assignmentExample(null);
+        assertThat(request.includeCarriedForward()).isTrue();
+        stubSolver(ASSIGNMENT_SOLUTION);
+
+        service.optimize(request);
+
+        verify(subscriptionRequestRepository).findEligibleCarryForwardCandidates(any(Pageable.class));
+    }
+
+    @Test
+    @DisplayName("candidate_count counts the whole pool, new candidates and carried ones together")
+    void candidateCountCountsTheWholePool() {
+        SubscriptionRequest carried = declinedCandidate(
+                priorRun(UUID.randomUUID()), "Investor E", new BigDecimal("3"), new BigDecimal("80"), 2);
+        when(subscriptionRequestRepository.findEligibleCarryForwardCandidates(any(Pageable.class)))
+                .thenReturn(List.of(carried));
+        stubSolver(ASSIGNMENT_SOLUTION);
+
+        service.optimize(assignmentExample());
+
+        assertThat(capturedRun().getCandidateCount()).isEqualTo(5);
+    }
+
+    @Test
+    @DisplayName("a row built from a carried candidate has carriedFrom set; a row from a new candidate has it null")
+    void tracksCarriedFromOnlyOnCarriedRows() {
+        SubscriptionRequest carried = declinedCandidate(
+                priorRun(UUID.randomUUID()), "Investor E", new BigDecimal("3"), new BigDecimal("80"), 2);
+        when(subscriptionRequestRepository.findEligibleCarryForwardCandidates(any(Pageable.class)))
+                .thenReturn(List.of(carried));
+        stubSolver(ASSIGNMENT_SOLUTION);
+
+        service.optimize(assignmentExample());
+
+        List<SubscriptionRequest> subscriptions = capturedRun().getSubscriptions();
+        assertThat(subscriptions).hasSize(5);
+        assertThat(subscriptions.subList(0, 4)).extracting(SubscriptionRequest::getCarriedFrom).containsOnlyNulls();
+        assertThat(subscriptions.get(4).getCarriedFrom()).isSameAs(carried);
     }
 
     // --- findByRequestId -----------------------------------------------------------
@@ -262,7 +361,7 @@ class SubscriptionOptimizationServiceTest {
 
         assertThat(response.requestId()).isEqualTo(requestId);
         assertThat(response.acceptedSubscriptions())
-                .extracting(SubscriptionRequestPayload::investorName)
+                .extracting(AcceptedSubscription::investorName)
                 .containsExactly("Investor A", "Investor B");
         assertThat(response.totalRequestedAmount()).isEqualByComparingTo("15.00");
         assertThat(response.totalFeeRevenue()).isEqualByComparingTo("320.00");
@@ -323,13 +422,33 @@ class SubscriptionOptimizationServiceTest {
     }
 
     private static OptimizeRequest assignmentExample() {
+        return assignmentExample(true);
+    }
+
+    private static OptimizeRequest assignmentExample(Boolean includeCarriedForward) {
         return new OptimizeRequest(
                 new BigDecimal("15"),
                 List.of(
                         new SubscriptionRequestPayload("Investor A", new BigDecimal("5"), new BigDecimal("120")),
                         new SubscriptionRequestPayload("Investor B", new BigDecimal("10"), new BigDecimal("200")),
                         new SubscriptionRequestPayload("Investor C", new BigDecimal("3"), new BigDecimal("80")),
-                        new SubscriptionRequestPayload("Investor D", new BigDecimal("8"), new BigDecimal("160"))));
+                        new SubscriptionRequestPayload("Investor D", new BigDecimal("8"), new BigDecimal("160"))),
+                includeCarriedForward);
+    }
+
+    /** A run from an earlier funding window, used only to give a carried candidate a parent. */
+    private static OptimizationRun priorRun(UUID requestId) {
+        return new OptimizationRun(
+                requestId, new BigDecimal("15"), new BigDecimal("12"), new BigDecimal("240"),
+                2, 4, SOLUTION_ALGORITHM_NAME, FIXED_NOW.minusSeconds(3600));
+    }
+
+    /** A declined candidate belonging to {@code priorRun}, eligible to be carried forward. */
+    private static SubscriptionRequest declinedCandidate(
+            OptimizationRun priorRun, String investorName, BigDecimal amount, BigDecimal fee, int inputIndex) {
+        SubscriptionRequest candidate = new SubscriptionRequest(investorName, amount, fee, false, inputIndex);
+        priorRun.addSubscription(candidate);
+        return candidate;
     }
 
     /** A run as it comes back from the repository; ids of never-persisted children stay null. */

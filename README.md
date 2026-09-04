@@ -74,12 +74,16 @@ curl -X POST http://localhost:8080/api/v1/subscriptions/optimize \
 ```
 
 ```json
-{"requestId":"3691981f-d259-49be-834e-251e6171f5e3","acceptedSubscriptions":[{"investorName":"Investor A","requestedAmount":5.00,"feeRevenue":120.00},{"investorName":"Investor B","requestedAmount":10.00,"feeRevenue":200.00}],"totalRequestedAmount":15.00,"totalFeeRevenue":320.00,"createdAt":"2026-08-25T10:21:01.235Z"}
+{"requestId":"3691981f-d259-49be-834e-251e6171f5e3","acceptedSubscriptions":[{"investorName":"Investor A","requestedAmount":5.00,"feeRevenue":120.00,"carriedForward":false},{"investorName":"Investor B","requestedAmount":10.00,"feeRevenue":200.00,"carriedForward":false}],"totalRequestedAmount":15.00,"totalFeeRevenue":320.00,"createdAt":"2026-08-25T10:21:01.235Z"}
 ```
 
 The response also carries a `Location` header pointing at the created resource
 (`http://localhost:8080/api/v1/subscriptions/3691981f-d259-49be-834e-251e6171f5e3`), so a
 client need not assemble the URL from the `requestId` itself.
+
+Two request fields and two response fields exist beyond what is shown above, and are
+covered in full after the next example: `includeCarriedForward` on the request, and
+`carriedForward` / `originalRequestId` on each accepted subscription.
 
 A run in which nothing fits is a successful run, not an error. With `maxCapacity` 5 and a
 single candidate requesting 50:
@@ -101,6 +105,52 @@ curl -X POST http://localhost:8080/api/v1/subscriptions/optimize \
 
 Still 201, still persisted, with an empty list and zero totals. See
 [Assumptions](#assumptions) for why this is a 201 rather than a 200.
+
+#### Carrying forward previously declined candidates
+
+Every request implicitly reconsiders candidates that earlier runs declined, alongside
+whatever is submitted this time — set `includeCarriedForward: false` to turn that off and
+solve only over `availableSubscriptions`. The field is optional; an absent field behaves
+exactly like `true`.
+
+Continuing the run above, Investors C and D were declined. A second request with a smaller
+capacity and one new candidate:
+
+```
+curl -X POST http://localhost:8080/api/v1/subscriptions/optimize \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "maxCapacity": 13,
+    "availableSubscriptions": [
+      {"investorName": "Investor Y", "requestedAmount": 10, "feeRevenue": 500}
+    ]
+  }'
+```
+
+```json
+{"requestId":"838f06c8-983a-45a4-8045-2829b925b7c6","acceptedSubscriptions":[{"investorName":"Investor Y","requestedAmount":10.00,"feeRevenue":500.00,"carriedForward":false},{"investorName":"Investor C","requestedAmount":3.00,"feeRevenue":80.00,"carriedForward":true,"originalRequestId":"a5ca35a5-fe35-43d2-9a99-616e3d358abc"}],"totalRequestedAmount":13.00,"totalFeeRevenue":580.00,"createdAt":"2026-09-04T15:53:01.113Z"}
+```
+
+Investor C — declined in the first run — is reconsidered alongside Investor Y, fits in the
+remaining capacity, and is accepted. `carriedForward` is `true` and `originalRequestId`
+names the run that first declined it (`a5ca35a5-...`, the run captured above). Investor Y is
+a genuinely new candidate: `carriedForward` is `false` and `originalRequestId` is absent
+from the JSON entirely, not merely `null` — every entry carries `carriedForward`, but
+`originalRequestId` appears only when there is a chain to report. Investor D, still
+declined, is *also* persisted in this run: it did not fit here either, but is now a **copy**
+of the original, ready to be offered again to a third run. See
+[Carrying forward previously declined candidates](#carrying-forward-previously-declined-candidates-1)
+under Design decisions for why a copy exists rather than a mutated original.
+
+Two concurrent requests can both consider the same declined candidate eligible and both try
+to carry it forward; the database allows only one to win. The loser gets **409 Conflict**:
+
+```json
+{"detail":"A carried-forward candidate in this request was claimed by a concurrent run. Retry the request.","instance":"/api/v1/subscriptions/optimize","status":409,"title":"Carried-forward candidate claimed concurrently","type":"https://arcticblu.example/problems/carried-forward-conflict"}
+```
+
+captured by firing two requests at once, both eligible to carry Investor D forward: one
+returned 201 with Investor D accepted, the other this 409. The request is safe to resubmit.
 
 ### GET /api/v1/subscriptions/{requestId} — 200 OK
 
@@ -172,6 +222,14 @@ An unknown run, 404:
 {"detail":"No optimization run found with id 00000000-0000-0000-0000-000000000000","instance":"/api/v1/subscriptions/00000000-0000-0000-0000-000000000000","status":404,"title":"Optimization run not found","type":"https://arcticblu.example/problems/run-not-found"}
 ```
 
+A carried-forward candidate claimed by a concurrent run, 409 — see
+[Carrying forward previously declined candidates](#carrying-forward-previously-declined-candidates)
+above for how this arises:
+
+```json
+{"detail":"A carried-forward candidate in this request was claimed by a concurrent run. Retry the request.","instance":"/api/v1/subscriptions/optimize","status":409,"title":"Carried-forward candidate claimed concurrently","type":"https://arcticblu.example/problems/carried-forward-conflict"}
+```
+
 The `errors` array carries the array index for nested failures — a bad amount on the first
 candidate reports the field as `availableSubscriptions[0].requestedAmount` — so a caller
 sending several hundred candidates learns which one is wrong rather than only that something
@@ -229,12 +287,13 @@ erDiagram
         varchar investor_name
         numeric requested_amount
         numeric fee_revenue
-        boolean accepted "false rows are the audit trail"
+        boolean accepted "false rows are the audit trail; partial index"
         integer input_index "unique per run"
+        bigint carried_from_id FK "self-reference, unique, RESTRICT on delete"
     }
 ```
 
-Two tables, created by three Flyway migrations.
+Two tables, created by four Flyway migrations.
 
 `optimization_run` holds the inputs and aggregate outputs of one run. `subscription_request`
 holds one row per candidate in that run, accepted or not.
@@ -303,6 +362,30 @@ corrupt state, not merely unusual. PostgreSQL enforces this with an index on
 `(run_id, input_index)`, whose leading column is `run_id` — so it partially overlaps the
 single-column index above. The narrower index was kept because it serves the fetch-join path
 at a smaller size; the redundancy is deliberate rather than overlooked.
+
+**`carried_from_id`, a self-reference on `subscription_request`.** Null for a candidate
+submitted directly to the run it belongs to; set to another row's `id` when this row exists
+because that other row was declined and is being reconsidered in a later run. See
+[Carrying forward previously declined candidates](#carrying-forward-previously-declined-candidates-1)
+below for why this is a new row rather than a mutation of the original.
+
+**`UNIQUE (carried_from_id)`.** A declined row may be copied into at most one later run.
+PostgreSQL treats every `NULL` as distinct under a unique index, so this constrains only the
+(small, and typically zero) set of rows that actually have a value here — it says nothing
+about the far larger set that don't. The constraint is what makes carrying a candidate
+forward safe under concurrency: two requests racing to carry the same declined candidate
+into two different runs both pass the application-level eligibility check, but only one of
+their inserts can succeed; the loser's `DataIntegrityViolationException` is reported as
+**409 Conflict** rather than silently letting the same investor's capital be committed
+twice. No `ON DELETE CASCADE` accompanies this foreign key — see the entity comment on
+`SubscriptionRequest.carriedFrom` and `V4__add_carried_forward_link.sql` for why deleting a
+run with carried-forward descendants is meant to fail rather than silently orphan them.
+
+**Partial index on `subscription_request(accepted) WHERE accepted = false`.** Supports the
+carry-forward eligibility query, which filters on `accepted = false` specifically. A partial
+index only ever indexes the declined rows, which is smaller than a full index over both
+outcomes and never grows to include the (generally larger, over the life of the service) set
+of accepted rows that query has no interest in.
 
 **Check constraints in the database as well as in Java.** Non-negative amounts, non-negative
 counts, and `accepted_count <= candidate_count`. The Java constructors enforce the same
@@ -555,6 +638,46 @@ direction.** This is a considered trade, not an oversight: a parallel set of ser
 result types, plus mappers in both directions, for three endpoints would be ceremony out of
 proportion to the project. The cost is that a second delivery mechanism would have to either
 reuse the web DTOs or force the refactor.
+
+### Carrying forward previously declined candidates
+
+**The original run is never modified.** It would be tempting, when a previously declined
+candidate now fits, to flip its `accepted` flag on the row that already exists. That flag
+records a decision made against *that run's* capacity, and the candidate genuinely did not
+fit in that window — it fit in a later, larger one. Rewriting it would also force rewriting
+that run's `total_fee_revenue` and `accepted_count`, contradicting the immutability the
+whole entity design rests on: `OptimizationRun implements Persistable`, the constant
+`hashCode()` on both entities, the absence of `@Version`, and the "denormalised totals and
+counts" rationale above, which is only true of a run that is written once and never updated.
+Instead, the new run gets its own row for that candidate, pointing back at the original via
+`carriedFrom`.
+
+**Identity comes from a foreign key, not from investor names.** [Investor names are labels,
+not identities](#assumptions) — nothing else in this system joins on them, and carry-forward
+does not either. Eligibility for being carried forward is: declined, and not already copied
+by any later row (`NOT EXISTS` a row whose `carriedFrom` points at it). The consequence,
+traced through the three situations that can hold for any given declined row:
+
+| Situation | Original row | Copy in a later run | Eligible now |
+|---|---|---|---|
+| Declined once, never carried | declined, no copy exists | — | the original |
+| Carried and accepted | has a copy, so excluded | accepted, so excluded | neither |
+| Carried and declined again | has a copy, so excluded | declined, no copy exists | the copy |
+
+`uq_subscription_request_carried_from` is what makes the third row of that table true rather
+than aspirational: without it, nothing would stop two different later runs from both
+claiming to be *the* copy of one declined row, at which point "not already copied" stops
+meaning anything.
+
+**The pool is bounded.** `max-carried-forward-candidates` (default 100, `application.yml`)
+caps how many declined candidates one request pulls in, ordered newest-run-first so a
+truncated pool keeps the freshest ones. Every carried candidate enlarges the problem the
+solver has to handle — candidate count drives both branch and bound's search and the dynamic
+programming table's row count — and the pool of declined candidates only grows over the life
+of the service. Without a ceiling, a request submitted early in the service's life would cost
+less than the identical request submitted a year later, purely because more history had
+accumulated in between. The ceiling keeps a request's cost a function of what it asks for,
+not of how long the service has been running.
 
 ## Assumptions
 

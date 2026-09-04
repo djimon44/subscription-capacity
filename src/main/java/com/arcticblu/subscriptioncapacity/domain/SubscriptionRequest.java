@@ -32,6 +32,16 @@ public class SubscriptionRequest {
     @Column(name = "input_index", nullable = false)
     private int inputIndex;
 
+    /**
+     * The row this candidate was copied from, when it is being re-offered to a later run
+     * after being declined; null for a candidate submitted directly in this run.
+     */
+    // Using @ManyToOne instead of @OneToOne to avoid JPA's proxy quirks, 
+    // relying on the DB unique constraint instead.
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "carried_from_id")
+    private SubscriptionRequest carriedFrom;
+
     protected SubscriptionRequest() {
         // Required by JPA; not for application use.
     }
@@ -41,6 +51,16 @@ public class SubscriptionRequest {
                                BigDecimal feeRevenue,
                                boolean accepted,
                                int inputIndex) {
+        this(investorName, requestedAmount, feeRevenue, accepted, inputIndex, null);
+    }
+
+    /** As above, additionally recording the declined row this candidate was carried from. */
+    public SubscriptionRequest(String investorName,
+                               BigDecimal requestedAmount,
+                               BigDecimal feeRevenue,
+                               boolean accepted,
+                               int inputIndex,
+                               SubscriptionRequest carriedFrom) {
         this.investorName = Objects.requireNonNull(investorName, "investorName must not be null");
         this.requestedAmount = CurrencyScale.normalize(
                 Objects.requireNonNull(requestedAmount, "requestedAmount must not be null"));
@@ -48,6 +68,7 @@ public class SubscriptionRequest {
                 Objects.requireNonNull(feeRevenue, "feeRevenue must not be null"));
         this.accepted = accepted;
         this.inputIndex = inputIndex;
+        this.carriedFrom = carriedFrom;
     }
 
     void setRun(OptimizationRun run) {
@@ -80,6 +101,14 @@ public class SubscriptionRequest {
 
     public int getInputIndex() {
         return inputIndex;
+    }
+
+    public SubscriptionRequest getCarriedFrom() {
+        return carriedFrom;
+    }
+
+    public boolean isCarriedForward() {
+        return carriedFrom != null;
     }
 
     @Override

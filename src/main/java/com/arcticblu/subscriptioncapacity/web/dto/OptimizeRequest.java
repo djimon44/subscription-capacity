@@ -11,6 +11,9 @@ import java.util.List;
  *
  * @param maxCapacity            total remaining subscription capacity for the window
  * @param availableSubscriptions candidate investor requests, at least one
+ * @param includeCarriedForward whether previously declined candidates from earlier runs
+ *                              are pooled alongside {@code availableSubscriptions} and
+ *                              reconsidered against this run's capacity.
  */
 public record OptimizeRequest(
 
@@ -24,5 +27,11 @@ public record OptimizeRequest(
         @NotEmpty(message = "availableSubscriptions must contain at least one entry")
         @Size(max = 1000, message = "availableSubscriptions must not exceed 1000 entries")
         @Valid
-        List<SubscriptionRequestPayload> availableSubscriptions) {
+        List<SubscriptionRequestPayload> availableSubscriptions,
+
+        Boolean includeCarriedForward) {
+
+    public OptimizeRequest {
+        includeCarriedForward = includeCarriedForward == null ? Boolean.TRUE : includeCarriedForward;
+    }
 }

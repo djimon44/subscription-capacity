@@ -57,6 +57,24 @@ class DynamicProgrammingKnapsackSolverTest {
     }
 
     @Test
+    @DisplayName("carry-forward counterexample: solving the pool at once beats optimising new candidates first")
+    void solvesCarryForwardPoolBetterThanATwoStageDesign() {
+        // A two-stage implementation (greedy on new candidates, then on old) would take X for 100
+        // and have nothing left. This test proves we solve the whole pool at once to get 160,
+        // and exists to prevent someone reintroducing a two-stage approach.
+        List<KnapsackItem> pool = List.of(
+                new KnapsackItem(0, 10, 100), // X, new
+                new KnapsackItem(1, 5, 80),   // Y, carried forward
+                new KnapsackItem(2, 5, 80));  // Z, carried forward
+
+        KnapsackSolution solution = solver.solve(pool, 10);
+
+        assertThat(solution.selectedIndices()).containsExactly(1, 2);
+        assertThat(solution.totalValue()).isEqualTo(160);
+        assertThat(solution.totalWeight()).isEqualTo(10);
+    }
+
+    @Test
     @DisplayName("the total value matches exhaustive search across randomised problems")
     void matchesBruteForceAcrossRandomisedProblems() {
         Random random = new Random(RANDOM_SEED);

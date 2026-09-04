@@ -10,7 +10,7 @@ import java.util.UUID;
  */
 public record OptimizationResultResponse(
         UUID requestId,
-        List<SubscriptionRequestPayload> acceptedSubscriptions,
+        List<AcceptedSubscription> acceptedSubscriptions,
         BigDecimal totalRequestedAmount,
         BigDecimal totalFeeRevenue,
         Instant createdAt) {

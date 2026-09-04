@@ -47,3 +47,11 @@ arcticblu:
     # programming cover more requests and so takes the exponential branch-and-bound path
     # less often, at the price of a larger worst-case allocation for a single request.
     max-table-cells: 10000000
+
+    # The pool of declined candidates grows without bound over the life of the service, and
+    # every carried candidate enlarges the problem the solver must handle - candidate count
+    # drives both the branch and bound search and the dynamic programming table's row count.
+    # This keeps a single request's cost predictable regardless of how much history has
+    # accumulated. Ordering (see SubscriptionRequestRepository) means a truncated pool still
+    # keeps the freshest declined candidates rather than an arbitrary subset.
+    max-carried-forward-candidates: 100

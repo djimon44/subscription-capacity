@@ -1,0 +1,9 @@
+{
+  "maxCapacity": 22,
+  "availableSubscriptions": [
+    { "investorName": "Investor A1", "requestedAmount": 5, "feeRevenue": 120 },
+    { "investorName": "Investor B2", "requestedAmount": 10, "feeRevenue": 200 },
+    { "investorName": "Investor C2", "requestedAmount": 8, "feeRevenue": 160 }
+  ],
+  "includeCarriedForward": true
+}
